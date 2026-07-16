@@ -1,0 +1,16 @@
+hub_id: hub_test_001
+user_id: usr_test_001
+cameras:
+  cam_salon:
+    zones:
+      cocina:
+        type: room
+        polygon: [[0, 0], [100, 0], [100, 100], [0, 100]]
+      puerta:
+        type: door
+        polygon: [[0, 0], [20, 0], [20, 20], [0, 20]]
+schedules:
+  expected_activity: {start: "07:00", end: "23:00"}
+  sleep_window: {start: "23:00", end: "07:00"}
+thresholds:
+  inactivity_minutes: 240
