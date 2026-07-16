@@ -62,6 +62,26 @@ async def test_door_zone_exit_produces_home_exit():
     assert types == ["home_entry", "home_exit"]
 
 
+async def test_malformed_frigate_payload_is_dropped_not_raised(caplog):
+    """mqtt_client (Task 10) only guarantees valid JSON, not valid business
+    shape. on_frigate_event runs inside mqtt_client.run_forever(), which is
+    awaited directly in main()'s asyncio.gather -- an uncaught exception here
+    would crash the whole event-engine process, violating "nunca se lanza el
+    proceso". A malformed but valid-JSON payload must be logged and dropped.
+    """
+    engine, store = _engine()
+    malformed_payloads = [
+        {"after": "not-a-dict"},
+        {"after": {"camera": "cam_salon", "current_zones": 42}},
+    ]
+    with caplog.at_level(logging.WARNING, logger="event_engine"):
+        for payload in malformed_payloads:
+            await engine.on_frigate_event(payload)  # must not raise
+
+    assert store.get_pending() == []
+    assert any("malformed frigate event payload" in record.message for record in caplog.records)
+
+
 async def test_availability_false_marks_all_configured_cameras_unavailable():
     engine, _ = _engine()
     await engine.on_frigate_availability(False)

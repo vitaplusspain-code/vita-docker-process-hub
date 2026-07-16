@@ -46,12 +46,25 @@ class EventEngine:
                 self.state.seed_last_motion(camera_id, datetime.fromisoformat(last))
 
     async def on_frigate_event(self, payload: dict) -> None:
-        after = payload.get("after") or {}
-        camera_id = after.get("camera")
-        if camera_id is None or camera_id not in self.config.cameras:
+        # Frigate's own JSON is already guaranteed valid by mqtt_client (Task
+        # 10), but not its business shape: "after" or "current_zones" could
+        # be present with an unexpected type (e.g. not a dict/list). This
+        # method runs inside mqtt_client.run_forever(), which is awaited
+        # directly in main()'s asyncio.gather -- an uncaught exception here
+        # would crash the whole event-engine process, the same "nunca se
+        # lanza el proceso" constraint the _persist_and_log deviation above
+        # protects. Malformed business content is logged and dropped instead.
+        try:
+            after = payload.get("after") or {}
+            camera_id = after.get("camera")
+            if camera_id is None or camera_id not in self.config.cameras:
+                return
+            now = datetime.now(timezone.utc)
+            current_zones = set(after.get("current_zones") or [])
+        except (AttributeError, TypeError) as exc:
+            logger.warning("malformed frigate event payload, dropping: %s (%s)", payload, exc)
             return
-        now = datetime.now(timezone.utc)
-        current_zones = set(after.get("current_zones") or [])
+
         self.state.touch_motion(camera_id, now)
 
         camera_cfg = self.config.cameras[camera_id]
