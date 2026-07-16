@@ -69,7 +69,8 @@ class EventStore:
 
     def get_pending(self) -> list[dict]:
         rows = self._conn.execute(
-            "SELECT payload FROM events WHERE status = 'pending' ORDER BY created_at"
+            "SELECT payload FROM events WHERE status IN ('pending', 'syncing') "
+            "ORDER BY created_at"
         ).fetchall()
         return [json.loads(row[0]) for row in rows]
 

@@ -45,6 +45,16 @@ def test_mark_synced_removes_event_from_pending():
     assert store.get_pending() == []
 
 
+def test_get_pending_includes_events_stuck_in_syncing():
+    store = EventStore(":memory:")
+    event = _event()
+    store.save_event(event)
+    store.mark_syncing(event.event_id)
+    pending = store.get_pending()
+    assert len(pending) == 1
+    assert pending[0]["event_id"] == event.event_id
+
+
 def test_last_motion_camera_returns_latest_start_time():
     store = EventStore(":memory:")
     store.save_event(_event(start_time=datetime(2026, 7, 10, 9, 0, 0, tzinfo=timezone.utc)))
