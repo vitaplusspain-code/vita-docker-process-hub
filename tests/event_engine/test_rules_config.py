@@ -26,3 +26,13 @@ def test_invalid_polygon_is_rejected():
 def test_incoherent_schedule_is_rejected():
     with pytest.raises(ValidationError):
         load_rules_config(FIXTURES / "invalid_schedule.yaml")
+
+
+def test_invalid_zone_type_is_rejected():
+    # A typo'd zone type (e.g. "rom" instead of "room") used to pass
+    # validation silently since Zone.type was a plain str -- every consumer
+    # (main.py, all four rules) would then skip that zone forever with no
+    # error. rules.yaml is the sole config surface for zones/schedules/
+    # thresholds, so this must fail loudly at load time instead.
+    with pytest.raises(ValidationError):
+        load_rules_config(FIXTURES / "invalid_zone_type.yaml")

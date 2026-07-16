@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from datetime import time
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, field_validator, model_validator
 
 
 class Zone(BaseModel):
-    type: str
+    type: Literal["room", "door"]
     polygon: list[list[float]]
 
     @field_validator("polygon")

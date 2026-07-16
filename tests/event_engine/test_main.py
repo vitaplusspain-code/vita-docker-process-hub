@@ -62,6 +62,25 @@ async def test_door_zone_exit_produces_home_exit():
     assert types == ["home_entry", "home_exit"]
 
 
+async def test_rapid_door_flip_within_debounce_window_settles_once():
+    """A person walking through a doorway is the ordinary case, not an edge
+    case: occupied -> unoccupied faster than the debounce window. Before the
+    per-zone task registry, both the entry and exit transitions scheduled
+    independent debounce tasks; neither was cancelled, so both fired and
+    both read the same final (unoccupied) state, producing two home_exit
+    rows and zero home_entry. Scheduling must now cancel the stale pending
+    task per zone so only the final settled state is evaluated once.
+    """
+    engine, store = _engine(debounce_seconds=0.05)
+    enter = {"after": {"camera": "cam_salon", "current_zones": ["puerta"]}}
+    exit_ = {"after": {"camera": "cam_salon", "current_zones": []}}
+    await engine.on_frigate_event(enter)
+    await engine.on_frigate_event(exit_)  # flips back before the debounce fires
+    await asyncio.sleep(0.15)
+    types = [e["type"] for e in store.get_pending()]
+    assert types == ["home_exit"]
+
+
 async def test_malformed_frigate_payload_is_dropped_not_raised(caplog):
     """mqtt_client (Task 10) only guarantees valid JSON, not valid business
     shape. on_frigate_event runs inside mqtt_client.run_forever(), which is

@@ -38,6 +38,14 @@ class EventEngine:
         self.door_rule = HomeExitEntryRule()
         self.inactivity_rule = InactivityProlongedRule()
         self.night_rule = NightActivityUnusualRule()
+        # One in-flight debounce task per zone: a rapid re-flip within the
+        # debounce window cancels the stale evaluation and reschedules,
+        # instead of both stacking and both reading the same final state
+        # (which produced duplicate/wrong home_entry/home_exit pairs for the
+        # ordinary door walk-through case). Also gives each task a retained
+        # strong reference and a place to surface unexpected exceptions,
+        # rather than a bare fire-and-forget asyncio.create_task.
+        self._zone_tasks: dict[tuple[str, str], asyncio.Task] = {}
 
     def bootstrap_last_motion(self) -> None:
         for camera_id in self.config.cameras:
@@ -74,7 +82,25 @@ class EventEngine:
             if not changed:
                 continue
             if zone_cfg.type == "door" or (zone_cfg.type == "room" and occupied):
-                asyncio.create_task(self._debounced_zone_check(camera_id, zone_id))
+                self._schedule_zone_check(camera_id, zone_id)
+
+    def _schedule_zone_check(self, camera_id: str, zone_id: str) -> None:
+        key = (camera_id, zone_id)
+        pending = self._zone_tasks.get(key)
+        if pending is not None and not pending.done():
+            pending.cancel()
+        task = asyncio.create_task(self._debounced_zone_check(camera_id, zone_id))
+        self._zone_tasks[key] = task
+        task.add_done_callback(lambda t, key=key: self._on_zone_task_done(key, t))
+
+    def _on_zone_task_done(self, key: tuple[str, str], task: asyncio.Task) -> None:
+        if self._zone_tasks.get(key) is task:
+            del self._zone_tasks[key]
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("debounced zone check for %s failed", key, exc_info=exc)
 
     async def _debounced_zone_check(self, camera_id: str, zone_id: str) -> None:
         await asyncio.sleep(self._debounce_seconds)
