@@ -24,5 +24,8 @@ class EdgeSyncStub:
 
     async def run_forever(self) -> None:
         while True:
-            self.sync_once()
+            try:
+                self.sync_once()
+            except Exception:
+                logger.exception("edge_sync_stub: sync_once failed, will retry next interval")
             await asyncio.sleep(self._interval)

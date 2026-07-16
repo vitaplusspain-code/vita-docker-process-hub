@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import datetime, timezone
 
@@ -33,3 +34,26 @@ def test_sync_once_with_nothing_pending_returns_zero():
     store = EventStore(":memory:")
     stub = EdgeSyncStub(store)
     assert stub.sync_once() == 0
+
+
+async def test_run_forever_survives_sync_once_failure(monkeypatch, caplog):
+    store = EventStore(":memory:")
+    stub = EdgeSyncStub(store, interval_seconds=0.01)
+
+    calls = []
+
+    def _failing_sync_once():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("boom")
+        return 0
+
+    monkeypatch.setattr(stub, "sync_once", _failing_sync_once)
+
+    task = asyncio.create_task(stub.run_forever())
+    with caplog.at_level(logging.ERROR):
+        await asyncio.sleep(0.05)
+    task.cancel()
+
+    assert len(calls) >= 2
+    assert "sync_once failed" in caplog.text
