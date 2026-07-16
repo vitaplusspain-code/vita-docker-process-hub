@@ -20,7 +20,8 @@ def _event():
 
 def test_sync_once_marks_all_pending_as_synced(caplog):
     store = EventStore(":memory:")
-    store.save_event(_event())
+    event = _event()
+    store.save_event(event)
     store.save_event(_event())
     stub = EdgeSyncStub(store)
     with caplog.at_level(logging.INFO):
@@ -28,6 +29,12 @@ def test_sync_once_marks_all_pending_as_synced(caplog):
     assert sent == 2
     assert store.get_pending() == []
     assert "edge_sync_stub" in caplog.text
+    # The event JSON must actually appear in the log line, not just be
+    # passed via `extra=` (which the default formatter never renders) --
+    # the manual verification checklist (Task 14) inspects this log to
+    # confirm only structured event JSON leaves the containers.
+    assert event.event_id in caplog.text
+    assert '"type": "presence_zone"' in caplog.text
 
 
 def test_sync_once_with_nothing_pending_returns_zero():

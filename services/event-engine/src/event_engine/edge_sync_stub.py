@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 
 from event_engine.event_store import EventStore
@@ -18,7 +19,7 @@ class EdgeSyncStub:
         for payload in pending:
             event_id = payload["event_id"]
             self._store.mark_syncing(event_id)
-            logger.info("edge_sync_stub: sending event %s", event_id, extra={"event": payload})
+            logger.info("edge_sync_stub: sending event %s: %s", event_id, json.dumps(payload))
             self._store.mark_synced(event_id)
         return len(pending)
 
