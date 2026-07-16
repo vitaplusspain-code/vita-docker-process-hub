@@ -1,0 +1,24 @@
+name: event-engine-ci
+
+on:
+  push:
+    paths:
+      - "services/event-engine/**"
+      - "tests/event_engine/**"
+      - ".github/workflows/event-engine-ci.yml"
+  pull_request:
+    paths:
+      - "services/event-engine/**"
+      - "tests/event_engine/**"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e "services/event-engine[dev]"
+      - run: ruff check services/event-engine/src tests/event_engine
+      - run: pytest tests/event_engine -v
