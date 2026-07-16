@@ -22,6 +22,10 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# Inert for the repo-root test invocation convention (see root pyproject.toml,
+# which is what pytest actually reads for `pytest tests/event_engine -v`).
+# Kept here too so this package's own config is self-describing if built/tested
+# standalone.
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 
