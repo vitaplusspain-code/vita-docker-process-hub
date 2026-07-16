@@ -1,0 +1,40 @@
+mqtt:
+  host: mosquitto
+  port: 1883
+  topic_prefix: frigate
+
+detectors:
+  tensorrt:
+    type: tensorrt
+    device: 0
+
+model:
+  path: /config/model_cache/tensorrt/yolov7-320.trt
+  input_tensor: nchw
+  input_pixel_format: rgb
+  width: 320
+  height: 320
+
+cameras:
+  cam_salon:
+    ffmpeg:
+      inputs:
+        - path: rtsp://mediamtx:8554/cam_salon_sub
+          roles:
+            - detect
+        - path: rtsp://mediamtx:8554/cam_salon_main
+          roles:
+            - record
+    detect:
+      width: 640
+      height: 360
+      fps: 5
+    record:
+      enabled: false
+    zones:
+      cocina:
+        coordinates: 0,0,100,0,100,100,0,100
+      puerta:
+        coordinates: 0,0,20,0,20,20,0,20
+
+version: 0.14
