@@ -1,6 +1,0 @@
-# This is the config pytest actually reads for the repo-root invocation
-# convention (`pytest tests/event_engine -v` from repo root). The copy in
-# services/event-engine/pyproject.toml is inert for that invocation — pytest
-# never discovers it since that directory isn't an ancestor of tests/.
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
