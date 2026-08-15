@@ -1,0 +1,12 @@
+services:
+  hub:
+    build: .
+    image: vitahub:local
+    restart: unless-stopped
+    network_mode: host          # necesario para el multicast ONVIF de descubrimiento
+    environment:
+      VITAHUB_ONVIF_USER: ${VITAHUB_ONVIF_USER:?falta usuario ONVIF}
+      VITAHUB_ONVIF_PASSWORD: ${VITAHUB_ONVIF_PASSWORD:?falta contraseña ONVIF}
+      VITAHUB_LOG_LEVEL: INFO
+    volumes:
+      - ./data:/data
