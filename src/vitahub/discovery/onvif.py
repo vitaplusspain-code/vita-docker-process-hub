@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 import re
 import socket
 import urllib.request
@@ -78,6 +79,16 @@ def parse_stream_uri(xml: str) -> str | None:
     return _tag(xml, "Uri")
 
 
+def select_main_sub(uris: list[str | None]) -> tuple[str, str]:
+    main = sub = ""
+    for i, uri in enumerate(uris):
+        if uri and i == 0:
+            main = uri
+        elif uri:
+            sub = uri
+    return main, sub or main
+
+
 def discover(creds: Credentials, timeout: float = 3.0) -> list[DiscoveredCamera]:
     """Orquestación de red. No cubierto por unit tests (requiere LAN/hardware)."""
     ips = _probe_network(timeout)
@@ -115,8 +126,6 @@ def _probe_network(timeout: float) -> list[str]:
 
 def _soap(url: str, body: str, creds: Credentials) -> str:
     created = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    import os
-
     header = wsse_header(creds.onvif_user, creds.onvif_password, created, os.urandom(16))
     envelope = (
         '<?xml version="1.0" encoding="UTF-8"?>'
@@ -143,9 +152,8 @@ def _interrogate(ip: str, creds: Credentials) -> DiscoveredCamera | None:
         return None
     profiles = _soap(media_url, "<trt:GetProfiles/>", creds)
     tokens = re.findall(r'token="([^"]+)"', profiles)
-    main = sub = ""
-    for i, tok in enumerate(dict.fromkeys(tokens)):
-        uri = parse_stream_uri(
+    uris: list[str | None] = [
+        parse_stream_uri(
             _soap(
                 media_url,
                 "<trt:GetStreamUri><trt:StreamSetup>"
@@ -155,10 +163,9 @@ def _interrogate(ip: str, creds: Credentials) -> DiscoveredCamera | None:
                 creds,
             )
         )
-        if uri and i == 0:
-            main = uri
-        elif uri:
-            sub = uri
+        for tok in dict.fromkeys(tokens)
+    ]
+    main, sub = select_main_sub(uris)
     return DiscoveredCamera(
-        id=f"onvif-{serial}", ip=ip, rtsp_main=main, rtsp_sub=sub or main
+        id=f"onvif-{serial}", ip=ip, rtsp_main=main, rtsp_sub=sub
     )

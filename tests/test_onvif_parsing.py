@@ -3,6 +3,7 @@ from vitahub.discovery.onvif import (
     parse_probe_matches,
     parse_serial,
     parse_stream_uri,
+    select_main_sub,
     wsse_header,
 )
 
@@ -46,3 +47,26 @@ def test_wsse_header_contains_digest_and_nonce():
     assert "UsernameToken" in header
     assert "admin" in header
     assert "secret" not in header  # la clave nunca va en claro
+
+
+def test_select_main_sub_two_uris():
+    assert select_main_sub(["rtsp://a", "rtsp://b"]) == ("rtsp://a", "rtsp://b")
+
+
+def test_select_main_sub_single_uri_falls_back():
+    assert select_main_sub(["rtsp://a"]) == ("rtsp://a", "rtsp://a")
+
+
+def test_select_main_sub_three_uris_sub_is_last():
+    assert select_main_sub(["rtsp://a", "rtsp://b", "rtsp://c"]) == (
+        "rtsp://a",
+        "rtsp://c",
+    )
+
+
+def test_select_main_sub_empty():
+    assert select_main_sub([]) == ("", "")
+
+
+def test_select_main_sub_none_at_index_zero():
+    assert select_main_sub([None, "rtsp://b"]) == ("", "rtsp://b")
