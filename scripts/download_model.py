@@ -1,11 +1,26 @@
 """Descarga los pesos YOLO en build (para embeberlos en la imagen)."""
 from __future__ import annotations
 
+import shutil
 import sys
+from pathlib import Path
 
 from ultralytics import YOLO
 
+
+def main() -> int:
+    dest = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("yolo11n.pt")
+    model = YOLO("yolo11n.pt")  # descarga a la cache de ultralytics
+    src = Path(getattr(model, "ckpt_path", "") or "yolo11n.pt")
+    if not src.exists():
+        print(f"error: no se encontró el peso descargado ({src})", file=sys.stderr)
+        return 1
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if src.resolve() != dest.resolve():
+        shutil.copy(src, dest)
+    print(f"modelo en {dest}")
+    return 0
+
+
 if __name__ == "__main__":
-    target = sys.argv[1] if len(sys.argv) > 1 else "yolo11n.pt"
-    YOLO(target)  # descarga a la cache; se copia en el Dockerfile
-    print(f"modelo {target} descargado")
+    sys.exit(main())

@@ -10,12 +10,12 @@ COPY pyproject.toml ./
 COPY src ./src
 RUN pip install --no-cache-dir .
 
-# Embebe los pesos del modelo (arranca sin internet).
-RUN python -c "from ultralytics import YOLO; YOLO('yolo11n.pt')" \
-    && mkdir -p /app/models \
-    && cp "$(python -c 'import ultralytics, os; print(os.path.join(os.getcwd(), "yolo11n.pt"))')" /app/models/yolo11n.pt || true
-
 COPY scripts ./scripts
+
+# Embebe los pesos del modelo (arranca sin internet). Falla el build si no se
+# pueden descargar/colocar los pesos: mejor un build roto que una imagen que
+# arranca sin modelo.
+RUN python scripts/download_model.py /app/models/yolo11n.pt
 
 ENV VITAHUB_CONFIG=/data/hub.yaml \
     VITAHUB_WEIGHTS=/app/models/yolo11n.pt \
