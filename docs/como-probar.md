@@ -99,6 +99,13 @@ cp config/hub.example.yaml ./hub.yaml
 export VITAHUB_CONFIG=./hub.yaml
 export VITAHUB_ONVIF_USER=admin VITAHUB_ONVIF_PASSWORD=CLAVE
 
+# IMPORTANTE en local: VITAHUB_WEIGHTS por defecto es /app/models/yolo11n.pt
+# (la ruta DENTRO del contenedor, donde la imagen embebe los pesos). En tu
+# máquina esa ruta no existe y Ultralytics intentaría descargar ahí y fallaría.
+# Apúntalo a una ruta escribible; "yolo11n.pt" descarga al directorio actual
+# la primera vez (necesita internet una vez).
+export VITAHUB_WEIGHTS=yolo11n.pt
+
 python -m vitahub.app
 ```
 
@@ -146,6 +153,7 @@ El contenedor usa `network_mode: host` (necesario para el multicast ONVIF) y
 | `cam ... no abre, reintento en Ns` en bucle | La cámara se descubrió pero el RTSP no abre: credencial incorrecta, ruta/puerto RTSP distintos, o la cámara requiere auth que no cuadra. |
 | No salen eventos aunque hay alguien | ¿`detector: stub`? (no emite). ¿confianza muy alta? Baja `confidence`. ¿Muy poca resolución? Prueba `stream: main`. |
 | Una cámara nueva no aparece | El descubrimiento es solo al arranque en esta versión: `docker compose restart`. |
+| `OSError: Read-only file system: '/app'` al arrancar en local | `VITAHUB_WEIGHTS` apunta a la ruta del contenedor (`/app/models/...`). En local: `export VITAHUB_WEIGHTS=yolo11n.pt` (o usa `detector: stub`). |
 
 ## Verificación previa a integrar (checklist)
 

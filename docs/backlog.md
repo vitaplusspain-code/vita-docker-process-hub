@@ -52,6 +52,10 @@ service, y resolver el media service vía capabilities/`GetServices` en vez de a
 - **`event_engine`:** `_required_hold(old, new)` no usa `old` (parámetro muerto).
 - **`app.py`:** `cap` se libera tras el `stop.wait(delay)` del backoff en vez de antes (higiene de
   recursos, no bug); `run()` no tiene cobertura de tests (código de integración).
+- **`person_yolo.from_weights`:** si el fichero de pesos (`VITAHUB_WEIGHTS`) no existe, Ultralytics
+  intenta descargarlo al directorio padre de esa ruta — que puede ser de solo lectura (p. ej. el
+  `/app/models` del contenedor corriendo en local) — y peta con un traceback confuso. Dar un error
+  claro ("pesos no encontrados en X") antes de invocar `YOLO()`.
 - **Workflow obsoleto:** `.github/workflows/event-engine-ci.yml` referencia rutas inexistentes
   (`services/event-engine`, `tests/event_engine`) — candidato a limpieza.
 
