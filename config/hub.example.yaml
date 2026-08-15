@@ -1,0 +1,10 @@
+hub_id: hub-CAMBIAME        # genera uno único por hogar y no lo cambies
+discovery:
+  interval_seconds: 60
+inference:
+  detector: person_yolo     # o "stub" para probar sin modelo
+  sample_fps: 2
+  confidence: 0.4
+  stream: substream         # "substream" ahorra CPU; "main" para más resolución
+cameras: []                 # se autopobla al descubrir; editable a mano
+# La credencial NO va aquí: usa VITAHUB_ONVIF_USER / VITAHUB_ONVIF_PASSWORD
