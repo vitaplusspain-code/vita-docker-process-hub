@@ -5,6 +5,7 @@ import hashlib
 import os
 import re
 import socket
+import urllib.error
 import urllib.request
 import uuid
 from datetime import UTC, datetime
@@ -79,6 +80,19 @@ def parse_stream_uri(xml: str) -> str | None:
     return _tag(xml, "Uri")
 
 
+def parse_profile_tokens(xml: str) -> list[str]:
+    """Extrae SOLO los tokens de los elementos <Profiles> de un GetProfilesResponse.
+
+    Un GetProfilesResponse trae un token por perfil (p. ej. PROFILE_000) pero
+    también tokens anidados de cada configuración (fuente de vídeo, encoder,
+    audio, PTZ...). Solo los tokens de perfil son válidos como ProfileToken en
+    GetStreamUri; pedir GetStreamUri con un token anidado hace que la cámara
+    responda HTTP 400. Por eso aquí se acotan al atributo token de <Profiles>.
+    """
+    tokens = re.findall(r'<(?:\w+:)?Profiles\b[^>]*\btoken="([^"]+)"', xml)
+    return list(dict.fromkeys(tokens))
+
+
 def select_main_sub(uris: list[str | None]) -> tuple[str, str]:
     main = sub = ""
     for i, uri in enumerate(uris):
@@ -151,10 +165,10 @@ def _interrogate(ip: str, creds: Credentials) -> DiscoveredCamera | None:
     if not serial:
         return None
     profiles = _soap(media_url, "<trt:GetProfiles/>", creds)
-    tokens = re.findall(r'token="([^"]+)"', profiles)
-    uris: list[str | None] = [
-        parse_stream_uri(
-            _soap(
+    uris: list[str | None] = []
+    for tok in parse_profile_tokens(profiles):
+        try:
+            resp = _soap(
                 media_url,
                 "<trt:GetStreamUri><trt:StreamSetup>"
                 "<tt:Stream>RTP-Unicast</tt:Stream><tt:Transport>"
@@ -162,10 +176,13 @@ def _interrogate(ip: str, creds: Credentials) -> DiscoveredCamera | None:
                 f"<trt:ProfileToken>{tok}</trt:ProfileToken></trt:GetStreamUri>",
                 creds,
             )
-        )
-        for tok in dict.fromkeys(tokens)
-    ]
+        except OSError as exc:  # un perfil sin stream no debe abortar el resto
+            _log.warning("cam %s: GetStreamUri(%s) falló: %s", ip, tok, exc)
+            uris.append(None)
+            continue
+        uris.append(parse_stream_uri(resp))
     main, sub = select_main_sub(uris)
-    return DiscoveredCamera(
-        id=f"onvif-{serial}", ip=ip, rtsp_main=main, rtsp_sub=sub
-    )
+    if not main:
+        _log.warning("cam %s (%s): sin URI RTSP resoluble", ip, serial)
+        return None
+    return DiscoveredCamera(id=f"onvif-{serial}", ip=ip, rtsp_main=main, rtsp_sub=sub)

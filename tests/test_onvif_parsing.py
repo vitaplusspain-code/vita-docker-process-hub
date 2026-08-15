@@ -1,11 +1,28 @@
 from vitahub.discovery.onvif import (
     build_probe,
     parse_probe_matches,
+    parse_profile_tokens,
     parse_serial,
     parse_stream_uri,
     select_main_sub,
     wsse_header,
 )
+
+# GetProfilesResponse realista (cámara AltoBeam/Tuby): cada <trt:Profiles> trae
+# su token de perfil, pero también tokens anidados de configuraciones. Solo los
+# de perfil son válidos como ProfileToken en GetStreamUri.
+PROFILES = """<trt:GetProfilesResponse xmlns:trt="http://www.onvif.org/ver10/media/wsdl"
+ xmlns:tt="http://www.onvif.org/ver10/schema">
+ <trt:Profiles fixed="true" token="PROFILE_000">
+   <tt:VideoSourceConfiguration token="V_SRC_CFG_000"/>
+   <tt:VideoEncoderConfiguration token="Streaming/Channels/1"/>
+   <tt:PTZConfiguration token="PTZConfigurationToken"/>
+ </trt:Profiles>
+ <trt:Profiles fixed="true" token="PROFILE_001">
+   <tt:VideoEncoderConfiguration token="Streaming/Channels/2"/>
+   <tt:AudioSourceConfiguration token="A_SRC_CFG_001"/>
+ </trt:Profiles>
+</trt:GetProfilesResponse>"""
 
 PROBE_MATCH = """<?xml version="1.0"?>
 <e:Envelope xmlns:e="http://www.w3.org/2003/05/soap-envelope"
@@ -36,6 +53,16 @@ def test_parse_probe_matches_extracts_ip():
 def test_parse_serial():
     assert parse_serial(DEVINFO) == "szjsa81a81e6adf9"
     assert parse_serial("<empty/>") is None
+
+
+def test_parse_profile_tokens_only_profile_tokens():
+    # Debe devolver SOLO los tokens de <Profiles>, no los anidados
+    # (V_SRC_CFG_000, Streaming/Channels/*, PTZ..., A_SRC_CFG_001).
+    assert parse_profile_tokens(PROFILES) == ["PROFILE_000", "PROFILE_001"]
+
+
+def test_parse_profile_tokens_empty():
+    assert parse_profile_tokens("<empty/>") == []
 
 
 def test_parse_stream_uri():
