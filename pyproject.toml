@@ -31,3 +31,8 @@ python_version = "3.12"
 packages = ["vitahub"]
 mypy_path = "src"
 strict = true
+
+[[tool.mypy.overrides]]
+module = ["ultralytics.*", "cv2.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
