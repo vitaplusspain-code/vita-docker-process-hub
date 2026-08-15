@@ -35,7 +35,11 @@ def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
     stop = threading.Event()
 
     # Descubrimiento inicial + reconciliación persistida.
-    discovered = discover(cfg.credentials, timeout=float(cfg.discovery.interval_seconds))
+    # Nota: cfg.discovery.interval_seconds es la cadencia de un futuro bucle de
+    # redescubrimiento periódico (no cableado en este slice); no es el timeout
+    # del socket de probe ONVIF, por eso aquí se usa el timeout por defecto de
+    # discover().
+    discovered = discover(cfg.credentials)
     cfg.cameras, changes = reconcile(cfg.cameras, discovered)
     for ch in changes:
         _log.info("registro: %s %s", ch.kind, ch.camera_id)
@@ -68,34 +72,47 @@ def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
 def _camera_loop(camera, rtsp_url, detector, engine, sink, cfg, stop):  # type: ignore[no-untyped-def]
     attempt = 0
     while not stop.is_set():
-        cap = open_capture(rtsp_url)
-        if not cap.isOpened():
+        cap = None
+        try:
+            cap = open_capture(rtsp_url)
+            if not cap.isOpened():
+                delay = backoff_delay(attempt)
+                _log.warning("cam %s no abre, reintento en %.0fs", camera.id, delay)
+                attempt += 1
+                stop.wait(delay)
+                continue
+            _log.info("cam %s conectada", camera.id)
+            attempt = 0
+            last_sample = 0.0
+            last_frame = time.monotonic()
+            while not stop.is_set():
+                ok, frame = cap.read()
+                now = time.monotonic()
+                if not ok:
+                    if is_stalled(last_frame, now, max_stale_s=10.0):
+                        _log.warning("cam %s estancada, reconecto", camera.id)
+                        break
+                    stop.wait(0.1)
+                    continue
+                last_frame = now
+                if should_sample(last_sample, now, cfg.inference.sample_fps):
+                    last_sample = now
+                    try:
+                        process_frame(camera, frame, detector, engine, sink, now)
+                    except Exception:  # noqa: BLE001 — un frame malo no tumba el worker
+                        _log.exception("cam %s error procesando frame", camera.id)
+            _log.info("cam %s desconectada", camera.id)
+        except Exception:  # noqa: BLE001 — un fallo de conexión no tumba el worker
+            _log.exception("cam %s error de conexión, reconecto", camera.id)
             delay = backoff_delay(attempt)
-            _log.warning("cam %s no abre, reintento en %.0fs", camera.id, delay)
             attempt += 1
             stop.wait(delay)
-            continue
-        _log.info("cam %s conectada", camera.id)
-        attempt = 0
-        last_sample = 0.0
-        last_frame = time.monotonic()
-        while not stop.is_set():
-            ok, frame = cap.read()
-            now = time.monotonic()
-            if not ok:
-                if is_stalled(last_frame, now, max_stale_s=10.0):
-                    _log.warning("cam %s estancada, reconecto", camera.id)
-                    break
-                continue
-            last_frame = now
-            if should_sample(last_sample, now, cfg.inference.sample_fps):
-                last_sample = now
+        finally:
+            if cap is not None:
                 try:
-                    process_frame(camera, frame, detector, engine, sink, now)
-                except Exception:  # noqa: BLE001 — un frame malo no tumba el worker
-                    _log.exception("cam %s error procesando frame", camera.id)
-        cap.release()
-        _log.info("cam %s desconectada", camera.id)
+                    cap.release()
+                except Exception:  # noqa: BLE001 — liberar no debe tumbar el worker
+                    _log.exception("cam %s error liberando captura", camera.id)
 
 
 def _touch_heartbeat() -> None:
