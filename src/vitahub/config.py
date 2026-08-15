@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -65,6 +67,8 @@ def _cameras_from_raw(raw: list[dict[str, object]]) -> list[Camera]:
             )
         except KeyError as exc:
             raise ConfigError(f"Cámara en config sin campo obligatorio {exc}") from exc
+        except TypeError as exc:
+            raise ConfigError("Cámara en config no es un mapping YAML") from exc
     return cameras
 
 
@@ -82,16 +86,37 @@ def load_config(path: Path, env: Mapping[str, str]) -> HubConfig:
         raise ConfigError("Falta 'hub_id' en la config")
 
     disc_raw = raw.get("discovery") or {}
+    if not isinstance(disc_raw, dict):
+        raise ConfigError("Sección 'discovery' debe ser un mapping YAML")
+
     inf_raw = raw.get("inference") or {}
+    if not isinstance(inf_raw, dict):
+        raise ConfigError("Sección 'inference' debe ser un mapping YAML")
+
+    try:
+        interval_seconds = int(disc_raw.get("interval_seconds", 60))
+    except (ValueError, TypeError) as exc:
+        raise ConfigError(
+            "Campo 'discovery.interval_seconds' no es numérico"
+        ) from exc
+
+    try:
+        sample_fps = float(inf_raw.get("sample_fps", 2.0))
+    except (ValueError, TypeError) as exc:
+        raise ConfigError("Campo 'inference.sample_fps' no es numérico") from exc
+
+    try:
+        confidence = float(inf_raw.get("confidence", 0.4))
+    except (ValueError, TypeError) as exc:
+        raise ConfigError("Campo 'inference.confidence' no es numérico") from exc
+
     return HubConfig(
         hub_id=str(hub_id),
-        discovery=DiscoveryConfig(
-            interval_seconds=int(disc_raw.get("interval_seconds", 60))
-        ),
+        discovery=DiscoveryConfig(interval_seconds=interval_seconds),
         inference=InferenceConfig(
             detector=str(inf_raw.get("detector", "person_yolo")),
-            sample_fps=float(inf_raw.get("sample_fps", 2.0)),
-            confidence=float(inf_raw.get("confidence", 0.4)),
+            sample_fps=sample_fps,
+            confidence=confidence,
             stream=str(inf_raw.get("stream", "substream")),
         ),
         cameras=_cameras_from_raw(raw.get("cameras") or []),
@@ -105,4 +130,16 @@ def save_cameras(path: Path, cameras: list[Camera]) -> None:
         {"id": c.id, "name": c.name, "last_ip": c.last_ip, "enabled": c.enabled}
         for c in cameras
     ]
-    path.write_text(yaml.safe_dump(raw, sort_keys=False, allow_unicode=True))
+    fd, tmp = tempfile.mkstemp(
+        dir=str(path.parent), prefix=".hub-", suffix=".yaml.tmp"
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(yaml.safe_dump(raw, sort_keys=False, allow_unicode=True))
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise

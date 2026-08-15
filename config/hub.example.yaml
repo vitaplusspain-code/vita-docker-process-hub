@@ -7,4 +7,6 @@ inference:
   confidence: 0.4
   stream: substream         # "substream" ahorra CPU; "main" para más resolución
 cameras: []                 # se autopobla al descubrir; editable a mano
+# Nota: tras el primer descubrimiento el hub reescribe este fichero (sección cameras);
+# los comentarios pueden perderse. Edita a mano solo con el hub parado.
 # La credencial NO va aquí: usa VITAHUB_ONVIF_USER / VITAHUB_ONVIF_PASSWORD

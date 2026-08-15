@@ -67,3 +67,20 @@ def test_save_cameras_roundtrip(tmp_path):
     reloaded = load_config(path, ENV)
     assert {c.id for c in reloaded.cameras} == {"onvif-abc", "onvif-new"}
     assert reloaded.hub_id == "hub-3f9a"  # resto preservado
+
+
+def test_non_mapping_camera_raises(tmp_path):
+    with pytest.raises(ConfigError):
+        load_config(_write(tmp_path, "hub_id: h\ncameras:\n  - oops\n"), ENV)
+
+
+def test_non_mapping_section_raises(tmp_path):
+    with pytest.raises(ConfigError):
+        load_config(_write(tmp_path, "hub_id: h\ndiscovery: [1, 2]\n"), ENV)
+
+
+def test_non_numeric_interval_raises(tmp_path):
+    with pytest.raises(ConfigError):
+        load_config(
+            _write(tmp_path, "hub_id: h\ndiscovery:\n  interval_seconds: abc\n"), ENV
+        )
