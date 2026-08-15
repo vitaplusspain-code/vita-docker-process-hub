@@ -43,6 +43,10 @@ docker compose up --build
 3. Verifica: `docker logs -f <container>` — deberías ver "cam onvif-... conectada" y
    eventos `person_detected` por stdout.
 4. El contenedor se relanza solo tras cortes de luz (`restart: unless-stopped`).
+5. **Aviso**: una cámara añadida DESPUÉS de que el hub ya esté arrancado **no**
+   se detecta automáticamente en esta versión — el descubrimiento solo corre
+   al arranque. Para que la recoja, ejecuta `docker compose restart` (el
+   redescubrimiento periódico queda para una futura versión).
 
 ## Despliegue en Jetson Orin (GPU)
 

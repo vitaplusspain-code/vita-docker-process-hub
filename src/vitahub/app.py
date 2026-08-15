@@ -16,8 +16,9 @@ from vitahub.ingest.rtsp import (
     is_stalled,
     open_capture,
     should_sample,
+    with_credentials,
 )
-from vitahub.logging_setup import configure_logging, get_logger
+from vitahub.logging_setup import configure_logging, get_logger, register_secret
 from vitahub.registry import reconcile
 from vitahub.sinks.stdout_json import StdoutJsonSink
 from vitahub.worker import process_frame
@@ -28,11 +29,19 @@ _HEARTBEAT_FILE = Path("/data/heartbeat")
 
 def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
     cfg = load_config(config_path, env)
+    register_secret(cfg.credentials.onvif_password)
     _log.info("hub %s arrancando", cfg.hub_id)
+
+    # Se instalan los manejadores de señal lo primero, antes de descubrimiento/
+    # carga del detector, para que una señal recibida durante el arranque se
+    # atienda igualmente (en vez de perderse mientras esas fases bloquean).
+    stop = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    signal.signal(signal.SIGINT, lambda *_: stop.set())
+
     detector = build_detector(cfg.inference, weights_path)
     engine = EventEngine(cfg.hub_id)
     sink = StdoutJsonSink()
-    stop = threading.Event()
 
     # Descubrimiento inicial + reconciliación persistida.
     # Nota: cfg.discovery.interval_seconds es la cadencia de un futuro bucle de
@@ -40,13 +49,25 @@ def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
     # del socket de probe ONVIF, por eso aquí se usa el timeout por defecto de
     # discover().
     discovered = discover(cfg.credentials)
+    if discovered:
+        _log.info("descubrimiento: %d cámaras", len(discovered))
+    else:
+        _log.warning(
+            "descubrimiento: 0 cámaras encontradas — revisa ONVIF/credencial/red"
+        )
     cfg.cameras, changes = reconcile(cfg.cameras, discovered)
     for ch in changes:
         _log.info("registro: %s %s", ch.kind, ch.camera_id)
     save_cameras(config_path, cfg.cameras)
 
-    uris = {dc.id: (dc.rtsp_sub if cfg.inference.stream == "substream" else dc.rtsp_main)
-            for dc in discovered}
+    uris = {
+        dc.id: with_credentials(
+            dc.rtsp_sub if cfg.inference.stream == "substream" else dc.rtsp_main,
+            cfg.credentials.onvif_user,
+            cfg.credentials.onvif_password,
+        )
+        for dc in discovered
+    }
 
     threads = [
         threading.Thread(
@@ -61,8 +82,6 @@ def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
     for t in threads:
         t.start()
 
-    signal.signal(signal.SIGTERM, lambda *_: stop.set())
-    signal.signal(signal.SIGINT, lambda *_: stop.set())
     while not stop.wait(timeout=5.0):
         _touch_heartbeat()
     _log.info("apagando (SIGTERM)")

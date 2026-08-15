@@ -1,6 +1,22 @@
 import json
 
-from vitahub.logging_setup import configure_logging, get_logger, redact
+import pytest
+
+from vitahub.logging_setup import (
+    _clear_secrets,
+    configure_logging,
+    get_logger,
+    redact,
+    register_secret,
+)
+
+
+@pytest.fixture(autouse=True)
+def _reset_secret_registry():
+    """Evita que los secretos registrados en un test se filtren a otros."""
+    _clear_secrets()
+    yield
+    _clear_secrets()
 
 
 def test_redact_hides_secret():
@@ -17,3 +33,13 @@ def test_logs_go_to_stderr_as_json(capsys):
     assert record["level"] == "INFO"
     assert record["message"] == "hola mundo"
     assert record["logger"] == "test"
+
+
+def test_register_secret_redacts_future_logs(capsys):
+    configure_logging("INFO")
+    register_secret("topsecretpw")
+    get_logger("test").info("conectando con clave %s", "topsecretpw")
+    captured = capsys.readouterr()
+    record = json.loads(captured.err.strip().splitlines()[-1])
+    assert "topsecretpw" not in record["message"]
+    assert "***" in record["message"]

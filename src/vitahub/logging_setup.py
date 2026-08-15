@@ -5,13 +5,27 @@ import logging
 import sys
 from collections.abc import Iterable
 
+_secrets: list[str] = []
+
+
+def register_secret(secret: str) -> None:
+    """Registra un secreto para que se redacte de todos los logs futuros."""
+    if secret:
+        _secrets.append(secret)
+
+
+def _clear_secrets() -> None:
+    """Solo para tests: vacía el registro de secretos entre casos."""
+    _secrets.clear()
+
 
 class _JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
+        message = redact(record.getMessage(), _secrets)
         payload = {
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": message,
         }
         if record.exc_info:
             payload["exc"] = self.formatException(record.exc_info)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from urllib.parse import quote, urlsplit, urlunsplit
 
 # Fuerza RTSP sobre TCP en el backend FFmpeg de OpenCV (debe fijarse antes de importar cv2).
 os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
@@ -18,6 +19,24 @@ def should_sample(last_sample_t: float, now: float, sample_fps: float) -> bool:
 
 def is_stalled(last_frame_t: float, now: float, max_stale_s: float) -> bool:
     return (now - last_frame_t) > max_stale_s
+
+
+def with_credentials(rtsp_url: str, user: str, password: str) -> str:
+    """Inserta credenciales en la netinfo de una URL RTSP si no las tiene ya.
+
+    El resultado de ONVIF GetStreamUri normalmente no lleva userinfo, así que
+    hay que inyectar user:password@ en el netloc (URL-encoded) para que el
+    stream abra. Si la URL ya trae userinfo o no hay usuario, se devuelve tal cual.
+    """
+    if not user:
+        return rtsp_url
+    parts = urlsplit(rtsp_url)
+    if "@" in parts.netloc:
+        return rtsp_url
+    encoded_user = quote(user, safe="")
+    encoded_password = quote(password, safe="")
+    netloc = f"{encoded_user}:{encoded_password}@{parts.netloc}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
 def open_capture(rtsp_url: str):  # type: ignore[no-untyped-def]

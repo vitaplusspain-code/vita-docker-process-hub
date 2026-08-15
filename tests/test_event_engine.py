@@ -61,3 +61,41 @@ def test_count_changed_between_nonzero():
     assert len(events) == 1
     assert events[0].type == "person_count_changed"
     assert events[0].payload["person_count"] == 2
+
+
+def test_two_cameras_isolated():
+    eng = _engine()
+    cam_a = Camera(id="cam-a", name="a", last_ip="10.0.0.1")
+    cam_b = Camera(id="cam-b", name="b", last_ip="10.0.0.2")
+
+    assert eng.observe(cam_a, 1, 0.9, now=0.0) == []  # candidato A desde 0.0
+    assert eng.observe(cam_b, 1, 0.9, now=0.5) == []  # candidato B desde 0.5
+
+    # A llega a su propio umbral (2s desde 0.0); B, observado en el mismo
+    # instante, no debe verse afectado por el estado de A.
+    events_a = eng.observe(cam_a, 1, 0.9, now=2.0)
+    assert len(events_a) == 1
+    assert events_a[0].type == "person_detected"
+    assert events_a[0].camera_id == "cam-a"
+    assert eng.observe(cam_b, 1, 0.9, now=2.0) == []  # a B aún le faltan 0.5s
+
+    # B llega a su propio umbral (2s desde 0.5); A, ya reportado, no reemite.
+    events_b = eng.observe(cam_b, 1, 0.9, now=2.5)
+    assert len(events_b) == 1
+    assert events_b[0].type == "person_detected"
+    assert events_b[0].camera_id == "cam-b"
+    assert eng.observe(cam_a, 1, 0.9, now=2.5) == []  # sin cambios, ya reportado
+
+
+def test_flap_resets_timer():
+    eng = _engine()
+    assert eng.observe(CAM, 1, 0.9, now=0.0) == []    # candidato 1 desde 0.0
+    assert eng.observe(CAM, 2, 0.9, now=1.0) == []    # flap a candidato 2 desde 1.0
+    assert eng.observe(CAM, 1, 0.9, now=1.5) == []    # flap de vuelta a candidato 1 desde 1.5
+
+    # Si el temporizador no se hubiese reiniciado en el último flap (1.5),
+    # 3.4 - 0.0 = 3.4s ya superaría el umbral de 2s y emitiría de más.
+    assert eng.observe(CAM, 1, 0.9, now=3.4) == []    # 3.4 - 1.5 = 1.9s < 2s
+    events = eng.observe(CAM, 1, 0.9, now=3.5)         # 3.5 - 1.5 = 2.0s >= 2s
+    assert len(events) == 1
+    assert events[0].type == "person_detected"
