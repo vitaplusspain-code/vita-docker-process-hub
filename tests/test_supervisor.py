@@ -182,3 +182,42 @@ def test_stop_all_respects_global_deadline():
     # Sin plazo global, 3 cámaras * join_timeout=2.0s serían >= 6s.
     assert elapsed < 2.0
     release.set()  # libera los hilos zombis para no ensuciar el resto de tests
+
+
+def test_stop_all_deadline_covers_the_wait_for_a_busy_lock():
+    """La espera del lock cuenta DENTRO del plazo global, no por fuera: un
+    apply() concurrente que tarda en reemplazar una cámara testaruda no debe
+    hacer que stop_all() tarde más que el deadline declarado."""
+    stop_seen = threading.Event()
+    release_old = threading.Event()
+
+    def stubborn_worker(camera, uri, stop):
+        stop.wait()
+        stop_seen.set()
+        release_old.wait(timeout=10.0)  # tarda mucho en morir tras la señal
+
+    sup = CameraSupervisor(stubborn_worker, join_timeout=5.0)
+    sup.apply([_cam("a")], {"a": "rtsp://old"})
+
+    replacer = threading.Thread(
+        target=lambda: sup.apply([_cam("a")], {"a": "rtsp://new"})
+    )
+    replacer.start()
+
+    # El apply() de reemplazo ya vio la señal de parada y sigue dentro de
+    # _stop() (con el lock de sup retenido) esperando a que el hilo viejo
+    # muera, hasta su propio join_timeout de 5s.
+    assert stop_seen.wait(timeout=2.0)
+
+    t0 = time.monotonic()
+    sup.stop_all(deadline_s=1.0)
+    elapsed = time.monotonic() - t0
+
+    # Sin contar la espera del lock dentro del plazo, esto tardaría ~5s (el
+    # join_timeout de la apply concurrente) antes de que stop_all empezara
+    # siquiera a ejecutar su propia lógica.
+    assert elapsed < 2.0
+
+    release_old.set()
+    replacer.join(timeout=10.0)
+    sup.stop_all()  # limpieza: para el worker de reemplazo que arrancó al final

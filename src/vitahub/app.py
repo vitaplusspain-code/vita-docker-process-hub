@@ -29,9 +29,11 @@ from vitahub.worker import process_frame
 _log = get_logger("app")
 _HEARTBEAT_FILE = Path("/data/heartbeat")
 
-# Plazo global (no por cámara) para que stop_all() no exceda el
+# Plazo global (no por cámara, y cubre también la espera por el lock interno
+# del supervisor, no solo los joins) para que stop_all() no exceda el
 # stop_grace_period de Docker (ver docker-compose.yml) por muchas cámaras
-# atascadas en cap.read(). Debe quedar con margen por debajo de ese valor.
+# atascadas en cap.read(). El tiempo TOTAL de stop_all() queda acotado por
+# este valor; debe quedar con margen real por debajo de stop_grace_period.
 _CAMERA_SHUTDOWN_DEADLINE_S = 20.0
 
 

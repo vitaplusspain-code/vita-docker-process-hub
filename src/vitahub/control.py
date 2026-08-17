@@ -120,6 +120,10 @@ def start_control_server(
         return None
     register_secret(token)
     httpd = ThreadingHTTPServer((host, port), _build_handler(service, token))
+    # Cada petición corre en su propio hilo (ThreadingMixIn); sin esto no son
+    # daemon, así que una petición en vuelo en el momento del shutdown()
+    # retrasaría la salida del proceso (o la impediría si se cuelga).
+    httpd.daemon_threads = True
     threading.Thread(
         target=httpd.serve_forever, name="control-http", daemon=True
     ).start()

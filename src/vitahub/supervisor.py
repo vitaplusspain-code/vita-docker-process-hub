@@ -114,17 +114,28 @@ class CameraSupervisor:
     def stop_all(self, deadline_s: float | None = None) -> None:
         """Para todos los workers y bloquea el supervisor (ver `apply`).
 
-        `deadline_s`, si se da, acota el tiempo TOTAL de esta llamada, no el
-        de cada cámara: con `join_timeout` por cámara, varias cámaras
-        atascadas sumarían minutos de espera, muy por encima de lo que
-        Docker concede antes del SIGKILL. Un hilo que no muere a tiempo se
-        abandona sin más — son hilos daemon, no hace falta matarlos.
+        `deadline_s`, si se da, acota el tiempo TOTAL de esta llamada —
+        incluida la espera por adquirir el lock, no solo los joins de cada
+        cámara. Un `apply()` concurrente puede retenerlo hasta su propio
+        `join_timeout`; si esa espera quedara fuera del plazo, el apagado
+        dejaría de estar realmente acotado (que es justo lo que este plazo
+        existe para evitar). Si el lock no se consigue a tiempo, se abandona
+        con un aviso: los workers son hilos daemon, el proceso puede salir
+        igualmente sin haberlos señalado.
         """
-        with self._lock:
+        deadline = None if deadline_s is None else time.monotonic() + deadline_s
+        lock_timeout = -1.0 if deadline is None else max(0.0, deadline - time.monotonic())
+        if not self._lock.acquire(timeout=lock_timeout):
+            _log.warning(
+                "stop_all: no se pudo adquirir el lock en %.1fs (apply() en curso), "
+                "se abandona sin esperar más — los workers son hilos daemon",
+                deadline_s,
+            )
+            return
+        try:
             self._stopped = True
             for handle in self._workers.values():
                 handle.stop.set()
-            deadline = None if deadline_s is None else time.monotonic() + deadline_s
             for camera_id, handle in self._workers.items():
                 timeout = self._join_timeout
                 if deadline is not None:
@@ -135,3 +146,5 @@ class CameraSupervisor:
                         "cam %s no terminó a tiempo, se abandona (hilo daemon)", camera_id
                     )
             self._workers.clear()
+        finally:
+            self._lock.release()

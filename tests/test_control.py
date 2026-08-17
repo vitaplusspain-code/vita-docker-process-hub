@@ -177,3 +177,16 @@ def test_handler_has_socket_timeout():
     handler_class = _build_handler(_FakeService(_ok_result()), "token")
     assert hasattr(handler_class, "timeout")
     assert handler_class.timeout == 10
+
+
+def test_server_uses_daemon_threads():
+    """Sin daemon_threads, una petición en vuelo en el momento del shutdown()
+    (hilo por request de ThreadingMixIn) retrasaría o impediría la salida
+    del proceso."""
+    httpd = start_control_server(_FakeService(_ok_result()), "secreto", port=0, host="127.0.0.1")
+    assert httpd is not None
+    try:
+        assert httpd.daemon_threads is True
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
