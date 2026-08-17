@@ -191,3 +191,26 @@ def test_unseen_camera_is_kept_and_not_started(tmp_path):
     cameras, uris = sup.calls[0]
     assert [c.id for c in cameras] == ["onvif-a"]
     assert uris == {}  # sin URI: el supervisor no la tocará
+
+
+def test_supervisor_apply_failure_returns_error(tmp_path):
+    """Fallo en supervisor.apply no propaga; devuelve status=error."""
+    path = _config_file(tmp_path)
+
+    class _FailingSupervisor:
+        def apply(self, cameras, uris):
+            raise RuntimeError("supervisor error")
+
+        def stop_all(self):
+            pass
+
+    service = RescanService(
+        _cfg(),
+        path,
+        _FailingSupervisor(),
+        lambda creds: [_disc("onvif-a", "10.0.0.5")],
+    )
+
+    result = service.run_once()
+
+    assert result.status == "error"

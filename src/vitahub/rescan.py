@@ -51,7 +51,11 @@ class RescanService:
             _log.info("rescan ya en curso, se ignora la petición")
             return RescanResult(status="busy")
         try:
-            return self._rescan()
+            try:
+                return self._rescan()
+            except Exception:  # noqa: BLE001 — cualquier fallo no controlado
+                _log.exception("rescan: fallo inesperado")
+                return RescanResult(status="error")
         finally:
             self._lock.release()
 
