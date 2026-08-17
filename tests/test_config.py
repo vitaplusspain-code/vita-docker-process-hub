@@ -84,3 +84,10 @@ def test_non_numeric_interval_raises(tmp_path):
         load_config(
             _write(tmp_path, "hub_id: h\ndiscovery:\n  interval_seconds: abc\n"), ENV
         )
+
+
+def test_non_positive_interval_is_rejected(tmp_path):
+    path = tmp_path / "hub.yaml"
+    path.write_text("hub_id: hub-x\ndiscovery:\n  interval_seconds: 0\n")
+    with pytest.raises(ConfigError, match="interval_seconds"):
+        load_config(path, {"VITAHUB_ONVIF_USER": "u", "VITAHUB_ONVIF_PASSWORD": "p"})

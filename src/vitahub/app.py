@@ -5,10 +5,12 @@ import signal
 import sys
 import threading
 import time
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 from vitahub.analytics.event_engine import EventEngine
-from vitahub.config import ConfigError, load_config, save_cameras
+from vitahub.config import ConfigError, load_config
+from vitahub.control import admin_port, start_control_server
 from vitahub.discovery.onvif import discover
 from vitahub.factory import build_detector
 from vitahub.ingest.rtsp import (
@@ -16,11 +18,12 @@ from vitahub.ingest.rtsp import (
     is_stalled,
     open_capture,
     should_sample,
-    with_credentials,
 )
 from vitahub.logging_setup import configure_logging, get_logger, register_secret
-from vitahub.registry import reconcile
+from vitahub.models import Camera
+from vitahub.rescan import RescanService
 from vitahub.sinks.stdout_json import StdoutJsonSink
+from vitahub.supervisor import CameraSupervisor
 from vitahub.worker import process_frame
 
 _log = get_logger("app")
@@ -32,9 +35,8 @@ def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
     register_secret(cfg.credentials.onvif_password)
     _log.info("hub %s arrancando", cfg.hub_id)
 
-    # Se instalan los manejadores de señal lo primero, antes de descubrimiento/
-    # carga del detector, para que una señal recibida durante el arranque se
-    # atienda igualmente (en vez de perderse mientras esas fases bloquean).
+    # Los manejadores de señal van lo primero, antes de descubrimiento y carga
+    # del detector, para que una señal recibida durante el arranque se atienda.
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
@@ -43,49 +45,65 @@ def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
     engine = EventEngine(cfg.hub_id)
     sink = StdoutJsonSink()
 
-    # Descubrimiento inicial + reconciliación persistida.
-    # Nota: cfg.discovery.interval_seconds es la cadencia de un futuro bucle de
-    # redescubrimiento periódico (no cableado en este slice); no es el timeout
-    # del socket de probe ONVIF, por eso aquí se usa el timeout por defecto de
-    # discover().
-    discovered = discover(cfg.credentials)
-    if discovered:
-        _log.info("descubrimiento: %d cámaras", len(discovered))
-    else:
-        _log.warning(
-            "descubrimiento: 0 cámaras encontradas — revisa ONVIF/credencial/red"
+    def worker(camera: Camera, rtsp_url: str, cam_stop: threading.Event) -> None:
+        _camera_loop(  # type: ignore[no-untyped-call]
+            camera, rtsp_url, detector, engine, sink, cfg, cam_stop
         )
-    cfg.cameras, changes = reconcile(cfg.cameras, discovered)
-    for ch in changes:
-        _log.info("registro: %s %s", ch.kind, ch.camera_id)
-    save_cameras(config_path, cfg.cameras)
 
-    uris = {
-        dc.id: with_credentials(
-            dc.rtsp_sub if cfg.inference.stream == "substream" else dc.rtsp_main,
-            cfg.credentials.onvif_user,
-            cfg.credentials.onvif_password,
-        )
-        for dc in discovered
-    }
+    supervisor = CameraSupervisor(worker)
+    service = RescanService(cfg, config_path, supervisor, discover)
 
-    threads = [
-        threading.Thread(
-            target=_camera_loop,
-            args=(cam, uris.get(cam.id), detector, engine, sink, cfg, stop),
-            name=f"cam-{cam.id}",
-            daemon=True,
-        )
-        for cam in cfg.cameras
-        if cam.enabled and uris.get(cam.id)
-    ]
-    for t in threads:
-        t.start()
+    # El rescan inicial usa exactamente el mismo camino que los periódicos.
+    result = service.run_once()
+    if result.status == "ok" and result.found == 0:
+        _log.warning("descubrimiento: 0 cámaras encontradas — revisa ONVIF/credencial/red")
+
+    httpd = _start_control_server_safe(service, env.get("VITAHUB_ADMIN_TOKEN", ""), admin_port(env))
+
+    # En su propio hilo: si el rescan compartiera hilo con el heartbeat, un
+    # discover() lento dejaría de latir y Docker reiniciaría un hub sano.
+    threading.Thread(
+        target=_rescan_loop,
+        args=(service, cfg.discovery.interval_seconds, stop),
+        name="rescan",
+        daemon=True,
+    ).start()
 
     while not stop.wait(timeout=5.0):
         _touch_heartbeat()
+
     _log.info("apagando (SIGTERM)")
+    supervisor.stop_all()
+    if httpd is not None:
+        httpd.shutdown()
     sink.close()
+
+
+def _start_control_server_safe(
+    service: RescanService, token: str, port: int
+) -> ThreadingHTTPServer | None:
+    """Arranca el servidor de control sin tumbar el hub si el puerto está ocupado.
+
+    El control HTTP es opcional (el rescan periódico sigue funcionando sin
+    él); un puerto ya tomado por otro servicio del Jetson no puede impedir
+    el arranque.
+    """
+    try:
+        return start_control_server(service, token, port)
+    except OSError as exc:
+        _log.warning(
+            "control HTTP no disponible (puerto %d ocupado o inaccesible): %s — "
+            "el hub sigue arrancando, el rescan periódico sí funcionará",
+            port,
+            exc,
+        )
+        return None
+
+
+def _rescan_loop(service: RescanService, interval_seconds: float, stop: threading.Event) -> None:
+    """Espera sobre el event de parada (no duerme): el apagado es inmediato."""
+    while not stop.wait(timeout=interval_seconds):
+        service.run_once()
 
 
 def _camera_loop(camera, rtsp_url, detector, engine, sink, cfg, stop):  # type: ignore[no-untyped-def]

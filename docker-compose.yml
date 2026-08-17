@@ -8,5 +8,8 @@ services:
       VITAHUB_ONVIF_USER: ${VITAHUB_ONVIF_USER:?falta usuario ONVIF}
       VITAHUB_ONVIF_PASSWORD: ${VITAHUB_ONVIF_PASSWORD:?falta contraseña ONVIF}
       VITAHUB_LOG_LEVEL: ${VITAHUB_LOG_LEVEL:-INFO}
+      # Sin token, el endpoint de control no abre puerto (queda solo el rescan periódico).
+      VITAHUB_ADMIN_TOKEN: ${VITAHUB_ADMIN_TOKEN:-}
+      VITAHUB_ADMIN_PORT: ${VITAHUB_ADMIN_PORT:-8787}
     volumes:
       - ./data:/data

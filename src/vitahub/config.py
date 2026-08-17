@@ -99,6 +99,8 @@ def load_config(path: Path, env: Mapping[str, str]) -> HubConfig:
         raise ConfigError(
             "Campo 'discovery.interval_seconds' no es numérico"
         ) from exc
+    if interval_seconds <= 0:
+        raise ConfigError("Campo 'discovery.interval_seconds' debe ser mayor que 0")
 
     try:
         sample_fps = float(inf_raw.get("sample_fps", 2.0))
