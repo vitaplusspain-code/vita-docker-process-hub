@@ -1,0 +1,19 @@
+# Override SOLO para desarrollo en macOS. En el Jetson no se usa: allí vale el
+# docker-compose.yml a secas.
+#
+# Por qué existe: Docker Desktop corre una VM Linux, así que `network_mode: host`
+# no significa "la red del Mac" sino "la red de la VM" (192.168.65.x). Dos
+# consecuencias: el multicast ONVIF del descubrimiento no llega a la LAN de casa,
+# y el puerto de control no es alcanzable desde el Mac (curl a 127.0.0.1:8787
+# responde "Couldn't connect to server").
+#
+# Este override cambia a red bridge y publica el puerto, de modo que el endpoint
+# SÍ responde desde el Mac. El descubrimiento por multicast sigue sin funcionar
+# en macOS — eso no lo arregla ningún ajuste de compose.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.mac.yml up
+services:
+  hub:
+    network_mode: bridge
+    ports:
+      - "127.0.0.1:8787:8787"

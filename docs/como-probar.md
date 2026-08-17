@@ -141,6 +141,30 @@ docker compose logs -f
 El contenedor usa `network_mode: host` (necesario para el multicast ONVIF) y
 `restart: unless-stopped` (se relanza tras un corte de luz).
 
+> **En macOS, el hub en Docker NO descubrirá tus cámaras.** No es un fallo del hub ni de la
+> configuración: Docker Desktop corre una VM Linux, así que `network_mode: host` significa "la red
+> de la VM" (`192.168.65.x`), no tu LAN. La sonda multicast a `239.255.255.250` se queda dentro de
+> la VM y `discover()` devuelve siempre 0 cámaras. Comprobado: el tráfico **unicast** sí sale (un
+> contenedor alcanza el `:10000` ONVIF y el `:554` RTSP de una cámara de la LAN), lo único que no
+> atraviesa es el multicast.
+>
+> Consecuencia práctica: **en el Mac, prueba con cámaras arrancando en local** (§3.2), no en Docker.
+> Docker en el Mac sirve para validar el empaquetado, el arranque, el endpoint de control y el
+> healthcheck — no el descubrimiento. La prueba de Docker con cámaras se hace en el Jetson, que es
+> Linux nativo y donde esto funciona por diseño.
+>
+> Añadido: en macOS el puerto de control tampoco es alcanzable desde el Mac con `network_mode:
+> host` (`curl` responde "Couldn't connect to server"). Para eso está `docker-compose.mac.yml`, que
+> pasa a red bridge y publica el `8787`:
+>
+> ```bash
+> docker compose -f docker-compose.yml -f docker-compose.mac.yml up
+> ```
+>
+> Si algún día hiciera falta descubrimiento real en Docker sobre Mac, la vía es cambiar el motor de
+> contenedores a uno con red *bridged* (Colima/Lima con `socket_vmnet`), que pone la VM en la LAN
+> con su propia IP. No lo arregla ninguna opción de `docker-compose.yml`.
+
 ### 3.4 Forzar un escaneo de cámaras
 
 El hub re-descubre solo cada `discovery.interval_seconds`. Para dar de alta una cámara
