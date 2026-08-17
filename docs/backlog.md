@@ -74,7 +74,53 @@ Jetsons por hogar, acceso remoto disponible o no, etc.).
 - **Workflow obsoleto:** `.github/workflows/event-engine-ci.yml` referencia rutas inexistentes
   (`services/event-engine`, `tests/event_engine`) — candidato a limpieza.
 
+### Diferidos del slice de rescan (2026-08-17)
+
+Salidos de las revisiones por tarea y de la revisión final; ninguno bloquea la integración.
+
+- **`line-length = 100` es hoy decorativo:** `ruff check` no lo verifica porque `E501` no está en el
+  ruleset por defecto y el proyecto no fija `select`. Hay ya alguna línea por encima de 100. Si se
+  quiere que la convención sea real, añadir `E501` al `select` de `pyproject.toml` — saldrán avisos
+  en código preexistente.
+- **`POST /rescan` no tiene tope de duración:** `discover()` puede tardar minutos con la red
+  saturada (sonda de 3 s más 8 s por llamada SOAP y por IP que conteste al multicast). Está
+  documentado para el cliente (timeout generoso, 409 = "ya en marcha"), pero el tope global encaja
+  en el punto 2 de arriba, que ya va a tocar ese fichero.
+- **`_touch_heartbeat` traga `OSError` sin log:** con `/data` en solo lectura el hub queda
+  `unhealthy` sin ninguna pista en `docker logs`. Un log una-sola-vez lo arregla.
+- **SIGTERM durante el rescan inicial no se atiende hasta que termina:** el apagado acotado no se
+  alcanza hasta que `run_once()` retorna, y el descubrimiento inicial no tiene tope. Un
+  `docker compose restart` durante el arranque acaba en SIGKILL. No corrompe nada (el guardado es
+  atómico y ahora con `fsync`).
+- **Temporales huérfanos en `/data`:** un SIGKILL entre el `mkstemp` y el `os.replace` de
+  `save_cameras` deja un `.hub-*.yaml.tmp`; nadie los limpia al arrancar. Higiene.
+- **`stop_all()` que agota su plazo esperando el lock retorna sin marcar `_stopped`:** en teoría un
+  `apply()` en espera podría arrancar un worker después. Impacto real nulo (el control ya está
+  cerrado, el hilo de rescan ya vio la parada, y el worker sería daemon).
+- **`with_credentials` mete la contraseña URL-encoded en la URI** y solo está registrada para
+  redacción la forma cruda. Hoy ninguna línea de log incluye una URI RTSP, así que no hay fuga;
+  registrar también la forma codificada cuesta una línea y cierra el flanco.
+- **Cobertura y documentación menores:** el test de la rama `enabled: false` del supervisor solo
+  asierta que no se arranca nada, no que el worker muera; `test_rescan_loop_runs_until_stopped` no
+  tiene tope de tiempo (si el bucle regresara, colgaría la suite en vez de fallar);
+  `test_non_positive_interval_is_rejected` cubre `0` pero no un negativo; la sección "Qué cubren y
+  qué no" de `como-probar.md` no menciona la cobertura nueva pese a haberse actualizado el recuento;
+  `como-funciona.md` describe el alcance como el del primer slice.
+
 ## Verificación pendiente en hardware real
 Las partes de red (descubrimiento ONVIF, captura RTSP) no corren en CI por diseño. Validar
 extremo-a-extremo contra una cámara real: `docker compose up` con la credencial del hogar y
 confirmar en `docker logs` la conexión y eventos `person_detected`.
+
+Del slice de rescan quedan además estos cuatro, que solo se pueden comprobar con cámaras:
+
+1. Conectar una cámara con el hub ya corriendo → aparece sola en ≤ `interval_seconds`, sin reiniciar.
+2. `POST /rescan` con token válido → la da de alta en el momento y responde con `added` y `started`.
+3. Cambiar la IP de una cámara registrada → su worker se relanza con la URI nueva, sin duplicar
+   eventos.
+4. Apagar una cámara → su worker reintenta con backoff y **no** desaparece del registro.
+
+Y tres números que se eligieron por estimación razonada, sin medir en un Jetson real: el
+`--start-period=180s` del `HEALTHCHECK`, el plazo de apagado de 20 s y el `stop_grace_period: 30s`.
+Si en campo el arranque con varias cámaras lentas supera los 180 s, o si un apagado que iba bien se
+corta, son los tres primeros a revisar.
