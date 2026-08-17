@@ -14,7 +14,8 @@
 
 - **Cero dependencias nuevas.** Todo con la stdlib. No añadir nada a `pyproject.toml`.
 - **mypy strict** (`[tool.mypy] strict = true`, `packages = ["vitahub"]`): todo el código de `src/` va tipado por completo, incluidos los retornos `-> None`.
-- **ruff** con `line-length = 100`.
+- **ruff** con `line-length = 100`. El código de los tests de este plan está escrito para
+  leerse; si alguna línea pasa de 100, pártela — no cambies el contenido del test.
 - Todo módulo nuevo empieza con `from __future__ import annotations`.
 - **Logs en español**, por `get_logger(<nombre>)` de `vitahub.logging_setup`. stdout es solo para eventos; los logs van a stderr.
 - Ningún test puede depender de la LAN, de multicast ni de una cámara. El descubrimiento entra **inyectado** como callable.
@@ -325,7 +326,7 @@ class CameraSupervisor:
 - [ ] **Step 4: Correr los tests y verificar que pasan**
 
 Run: `pytest tests/test_supervisor.py -v`
-Expected: PASS (10 tests)
+Expected: PASS (9 tests)
 
 - [ ] **Step 5: Puertas de calidad**
 
@@ -361,8 +362,6 @@ Crear `tests/test_rescan.py`:
 ```python
 import threading
 from pathlib import Path
-
-import pytest
 
 from vitahub.config import (
     Credentials,
@@ -1157,11 +1156,18 @@ def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
     sink.close()
 
 
-def _rescan_loop(service, interval_seconds, stop):  # type: ignore[no-untyped-def]
+def _rescan_loop(
+    service: RescanService, interval_seconds: float, stop: threading.Event
+) -> None:
     """Espera sobre el event de parada (no duerme): el apagado es inmediato."""
     while not stop.wait(timeout=interval_seconds):
         service.run_once()
 ```
+
+> Va tipada por completo (mypy solo comprueba `src/`, así que el doble de los
+> tests sigue valiendo por duck typing). `_camera_loop` mantiene su
+> `# type: ignore[no-untyped-def]` porque maneja fotogramas de cv2, que no
+> tienen stubs; aquí no hay nada que lo justifique.
 
 Notas para quien implemente:
 - `with_credentials` deja de usarse en `app.py` (ahora vive en `RescanService`): quitarlo del import o ruff marcará `F401`.
