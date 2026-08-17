@@ -4,6 +4,10 @@ services:
     image: vitahub:local
     restart: unless-stopped
     network_mode: host          # necesario para el multicast ONVIF de descubrimiento
+    # Margen por encima del plazo global de apagado (20s en app.py) antes de
+    # que Docker mande SIGKILL; el valor por defecto de Docker (10s) se
+    # queda corto para el peor caso.
+    stop_grace_period: 30s
     environment:
       VITAHUB_ONVIF_USER: ${VITAHUB_ONVIF_USER:?falta usuario ONVIF}
       VITAHUB_ONVIF_PASSWORD: ${VITAHUB_ONVIF_PASSWORD:?falta contraseña ONVIF}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -38,10 +39,17 @@ class CameraSupervisor:
         self._join_timeout = join_timeout
         self._workers: dict[str, _WorkerHandle] = {}
         self._lock = threading.Lock()
+        self._stopped = False
 
     def apply(self, cameras: list[Camera], uris: dict[str, str]) -> SupervisorChange:
         change = SupervisorChange()
         with self._lock:
+            # Una vez llamado stop_all(), cualquier apply() posterior (un
+            # rescan periódico o una petición HTTP que ya estaba en vuelo) no
+            # debe arrancar workers nuevos: nadie volverá a pararlos.
+            if self._stopped:
+                _log.info("apply() ignorado: el supervisor ya está parado")
+                return change
             for camera in cameras:
                 self._apply_one(camera, uris.get(camera.id), change)
         return change
@@ -103,14 +111,27 @@ class CameraSupervisor:
         del self._workers[camera_id]
         return True
 
-    def stop_all(self) -> None:
+    def stop_all(self, deadline_s: float | None = None) -> None:
+        """Para todos los workers y bloquea el supervisor (ver `apply`).
+
+        `deadline_s`, si se da, acota el tiempo TOTAL de esta llamada, no el
+        de cada cámara: con `join_timeout` por cámara, varias cámaras
+        atascadas sumarían minutos de espera, muy por encima de lo que
+        Docker concede antes del SIGKILL. Un hilo que no muere a tiempo se
+        abandona sin más — son hilos daemon, no hace falta matarlos.
+        """
         with self._lock:
+            self._stopped = True
             for handle in self._workers.values():
                 handle.stop.set()
+            deadline = None if deadline_s is None else time.monotonic() + deadline_s
             for camera_id, handle in self._workers.items():
-                handle.thread.join(timeout=self._join_timeout)
+                timeout = self._join_timeout
+                if deadline is not None:
+                    timeout = max(0.0, min(timeout, deadline - time.monotonic()))
+                handle.thread.join(timeout=timeout)
                 if handle.thread.is_alive():
                     _log.warning(
-                        "cam %s no terminó en %.0fs", camera_id, self._join_timeout
+                        "cam %s no terminó a tiempo, se abandona (hilo daemon)", camera_id
                     )
             self._workers.clear()

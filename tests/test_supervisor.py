@@ -138,3 +138,47 @@ def test_replacement_waits_for_previous_worker_to_die():
 
     assert _eventually(_replacement_started)
     sup.stop_all()
+
+
+def test_apply_after_stop_all_is_a_noop():
+    """Un apply() que llega tras stop_all() (rescan en vuelo, HTTP en vuelo)
+    no debe arrancar workers huérfanos que nadie volverá a parar."""
+    starts = []
+    sup = CameraSupervisor(_recording_worker(starts))
+    sup.stop_all()
+
+    change = sup.apply([_cam("a")], {"a": "rtsp://new"})
+
+    assert change.started == []
+    assert change.restarted == []
+    assert starts == []
+
+
+def test_stop_all_respects_global_deadline():
+    """Con varias cámaras atascadas, el tiempo TOTAL de stop_all está acotado
+    por un plazo global, no por join_timeout multiplicado por cada cámara."""
+    ready = threading.Event()
+    release = threading.Event()
+    seen: list[str] = []
+
+    def stubborn_worker(camera, uri, stop):
+        seen.append(camera.id)
+        if len(seen) == 3:
+            ready.set()
+        stop.wait()
+        release.wait(timeout=5.0)  # nunca muere dentro del plazo de la prueba
+
+    sup = CameraSupervisor(stubborn_worker, join_timeout=2.0)
+    sup.apply(
+        [_cam("a"), _cam("b"), _cam("c")],
+        {"a": "rtsp://a", "b": "rtsp://b", "c": "rtsp://c"},
+    )
+    assert ready.wait(timeout=3.0)
+
+    t0 = time.monotonic()
+    sup.stop_all(deadline_s=0.5)
+    elapsed = time.monotonic() - t0
+
+    # Sin plazo global, 3 cámaras * join_timeout=2.0s serían >= 6s.
+    assert elapsed < 2.0
+    release.set()  # libera los hilos zombis para no ensuciar el resto de tests

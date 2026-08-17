@@ -1,3 +1,4 @@
+import logging
 import threading
 from unittest.mock import patch
 
@@ -37,3 +38,25 @@ def test_start_control_server_safe_swallows_os_error_when_port_busy():
     with patch("vitahub.app.start_control_server", side_effect=OSError("Address already in use")):
         result = _start_control_server_safe(service=object(), token="x", port=8787)
     assert result is None
+
+
+def test_start_control_server_safe_logs_warning_without_leaking_token(caplog):
+    """El fallo debe quedar explicado en el log (no tragado en silencio) y sin
+    filtrar el token de admin en el mensaje."""
+    secret_token = "el-token-secreto-9f3"
+    with (
+        patch(
+            "vitahub.app.start_control_server",
+            side_effect=OSError("Address already in use"),
+        ),
+        caplog.at_level(logging.WARNING, logger="app"),
+    ):
+        result = _start_control_server_safe(service=object(), token=secret_token, port=8787)
+
+    assert result is None
+    assert len(caplog.records) == 1
+    message = caplog.records[0].getMessage()
+    assert "control HTTP" in message
+    assert "no disponible" in message
+    assert "8787" in message
+    assert secret_token not in message

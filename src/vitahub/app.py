@@ -29,6 +29,11 @@ from vitahub.worker import process_frame
 _log = get_logger("app")
 _HEARTBEAT_FILE = Path("/data/heartbeat")
 
+# Plazo global (no por cámara) para que stop_all() no exceda el
+# stop_grace_period de Docker (ver docker-compose.yml) por muchas cámaras
+# atascadas en cap.read(). Debe quedar con margen por debajo de ese valor.
+_CAMERA_SHUTDOWN_DEADLINE_S = 20.0
+
 
 def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
     cfg = load_config(config_path, env)
@@ -40,6 +45,14 @@ def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
+
+    # Toque de latido temprano, antes de cargar el detector y del rescan
+    # inicial. /data/heartbeat vive en un bind mount: tras un corte de luz
+    # sobrevive con la marca de tiempo de ANTES del apagón. Sin este toque
+    # aquí, el healthcheck vería ese latido caducado mientras el hub todavía
+    # está cargando YOLO o sondeando ONVIF (nada de eso tiene tope global) y
+    # Docker reiniciaría un hub que está perfectamente vivo.
+    _touch_heartbeat()
 
     detector = build_detector(cfg.inference, weights_path)
     engine = EventEngine(cfg.hub_id)
@@ -69,14 +82,40 @@ def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
         daemon=True,
     ).start()
 
-    while not stop.wait(timeout=5.0):
-        _touch_heartbeat()
+    # Segundo toque justo antes del bucle de latido: cubre el hueco entre el
+    # toque de arriba y el primer `stop.wait(timeout=5.0)` de abajo, que de
+    # otro modo tardaría hasta 5s en tocar el latido por primera vez.
+    _touch_heartbeat()
 
-    _log.info("apagando (SIGTERM)")
-    supervisor.stop_all()
-    if httpd is not None:
-        httpd.shutdown()
-    sink.close()
+    try:
+        while not stop.wait(timeout=5.0):
+            _touch_heartbeat()
+    finally:
+        _log.info("apagando (SIGTERM)")
+        _shutdown(httpd, supervisor, sink)
+
+
+def _shutdown(
+    httpd: ThreadingHTTPServer | None, supervisor: CameraSupervisor, sink: StdoutJsonSink
+) -> None:
+    """Cierra en orden y con cada paso garantizado pase lo que pase con el anterior.
+
+    Primero el control HTTP: si se cerrara después de parar los workers, una
+    petición POST /rescan que ya estuviera en vuelo podría llegar a
+    `supervisor.apply()` tras `stop_all()` y arrancar workers huérfanos que ya
+    nadie señalará. Luego los workers, con un plazo global acotado (no por
+    cámara, ver `_CAMERA_SHUTDOWN_DEADLINE_S`). El sink se cierra siempre,
+    incluso si algo de lo anterior falla.
+    """
+    try:
+        if httpd is not None:
+            httpd.shutdown()
+            httpd.server_close()
+    finally:
+        try:
+            supervisor.stop_all(deadline_s=_CAMERA_SHUTDOWN_DEADLINE_S)
+        finally:
+            sink.close()
 
 
 def _start_control_server_safe(

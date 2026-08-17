@@ -21,7 +21,11 @@ ENV VITAHUB_CONFIG=/data/hub.yaml \
     VITAHUB_WEIGHTS=/app/models/yolo11n.pt \
     PYTHONUNBUFFERED=1
 
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+# start-period cubre el peor caso de arranque: cargar YOLO más un
+# descubrimiento ONVIF sin tope global (varias cámaras que no contestan, cada
+# una con varias llamadas SOAP de hasta 8s). Los fallos del healthcheck
+# durante esta ventana no cuentan para los reintentos.
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=180s \
     CMD python /app/scripts/healthcheck.py || exit 1
 
 ENTRYPOINT ["python", "-m", "vitahub.app"]
