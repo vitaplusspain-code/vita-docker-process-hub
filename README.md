@@ -43,10 +43,18 @@ docker compose up --build
 3. Verifica: `docker logs -f <container>` — deberías ver "cam onvif-... conectada" y
    eventos `person_detected` por stdout.
 4. El contenedor se relanza solo tras cortes de luz (`restart: unless-stopped`).
-5. **Aviso**: una cámara añadida DESPUÉS de que el hub ya esté arrancado **no**
-   se detecta automáticamente en esta versión — el descubrimiento solo corre
-   al arranque. Para que la recoja, ejecuta `docker compose restart` (el
-   redescubrimiento periódico queda para una futura versión).
+5. **Cámaras nuevas**: el hub re-descubre la LAN cada `discovery.interval_seconds`
+   (60 s por defecto), así que una cámara añadida después se da de alta sola. Para
+   no esperar, define `VITAHUB_ADMIN_TOKEN` (genera uno con `openssl rand -hex 32`)
+   y dispara el escaneo desde la misma red:
+
+   ```bash
+   curl -X POST -H "Authorization: Bearer $VITAHUB_ADMIN_TOKEN" \
+     http://<ip-del-jetson>:8787/rescan
+   ```
+
+   Responde con las cámaras encontradas y las dadas de alta. Sin ese token el
+   endpoint no escucha en ningún puerto y solo funciona el escaneo periódico.
 
 ## Despliegue en Jetson Orin (GPU)
 

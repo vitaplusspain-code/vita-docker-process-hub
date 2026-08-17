@@ -57,6 +57,9 @@ Dos ideas de diseño que conviene retener:
 | Módulo | Responsabilidad |
 |---|---|
 | `app.py` | Supervisor: arranque, cableado, un hilo por cámara, señales, heartbeat, apagado. |
+| `supervisor.py` | Posee los hilos de cámara: arranca, relanza y para workers en caliente. |
+| `rescan.py` | Un ciclo de rescan: descubrir → reconciliar → persistir → converger workers. |
+| `control.py` | Servidor HTTP local: `POST /rescan` autenticado con token. |
 | `config.py` | Carga/valida/persiste la config YAML; credencial desde entorno; *fail-fast*. |
 | `models.py` | Tipos de dominio: `Camera`, `Detection`, `Event` (con `Event.to_json()`). |
 | `discovery/onvif.py` | WS-Discovery + SOAP ONVIF: descubre cámaras y resuelve sus URIs RTSP. |
@@ -88,7 +91,10 @@ Dos ideas de diseño que conviene retener:
    conocida con IP distinta → se actualiza su `last_ip`; cámara que deja de verse → **se conserva**.
 4. `save_cameras()` reescribe la sección `cameras` del fichero de config de forma **atómica**.
 
-> **Nota:** en esta versión el descubrimiento corre **solo al arranque**. Ver limitaciones abajo.
+> **Nota:** este ciclo (descubrir → reconciliar → persistir → converger workers) es el
+> mismo al arrancar, cada `discovery.interval_seconds` y cuando llega un `POST /rescan`.
+> El registro solo se reescribe si hubo cambios. Una cámara que deja de verse **no** se
+> para: un probe multicast perdido no debe apagar una cámara que funciona.
 
 ### 3. Un hilo por cámara (`_camera_loop`)
 Por cada cámara habilitada con URI resuelta se lanza un hilo *daemon* que:
@@ -115,6 +121,13 @@ Por cada cámara habilitada con URI resuelta se lanza un hilo *daemon* que:
 - El bucle principal refresca `/data/heartbeat` cada 5 s; el `HEALTHCHECK` de Docker
   (`scripts/healthcheck.py`) lo considera sano si el fichero tiene <60 s. Si el proceso se cuelga,
   Docker lo reinicia.
+- El rescan periódico corre en **su propio hilo**: así el latido nunca depende de lo que
+  tarde un descubrimiento, y un `discover()` lento no provoca un reinicio en falso.
+- Aun así, el `HEALTHCHECK` da un margen de arranque (`--start-period=180s`) para que la
+  carga de YOLO y un primer descubrimiento lento no cuenten como fallo antes de que el
+  hub llegue a latir. Al apagar, `docker-compose.yml` fija `stop_grace_period: 30s` —
+  margen por encima del plazo de apagado de los hilos de cámara (~20 s) antes de que
+  Docker mande `SIGKILL`.
 - Ante `SIGTERM`/`SIGINT` se activa un `Event` de parada, los hilos terminan, el sink se vacía y el
   proceso sale limpio.
 
@@ -153,7 +166,7 @@ los dos (va por entorno y está registrada para redacción).
 ```yaml
 hub_id: hub-3f9a            # único por hogar, generado una vez
 discovery:
-  interval_seconds: 60      # reservado para redescubrimiento periódico (futuro)
+  interval_seconds: 60      # cadencia del redescubrimiento (debe ser > 0)
 inference:
   detector: person_yolo     # o "stub"
   sample_fps: 2
@@ -171,6 +184,8 @@ cameras: []                 # se autopobla al descubrir
 | `VITAHUB_CONFIG` | `/data/hub.yaml` | Ruta del fichero de config. |
 | `VITAHUB_WEIGHTS` | `/app/models/yolo11n.pt` | Pesos YOLO (embebidos en la imagen). |
 | `VITAHUB_LOG_LEVEL` | `INFO` | Nivel de log. |
+| `VITAHUB_ADMIN_TOKEN` | — (vacío = deshabilitado) | Token de `POST /rescan`. Sin él no se abre puerto. |
+| `VITAHUB_ADMIN_PORT` | `8787` | Puerto del endpoint de control. |
 
 ## Empaquetado y despliegue
 
@@ -188,10 +203,12 @@ Orin, por **GPU/TensorRT**. La interfaz `Detector` es idéntica; cambia solo la 
 
 ## Limitaciones conocidas de esta versión
 
-Documentadas en detalle en [backlog.md](backlog.md). Las dos con más impacto:
+Documentadas en detalle en [backlog.md](backlog.md). Las de más impacto:
 
-- **Descubrimiento solo al arranque** (no periódico): una cámara que aparece tarde o cambia de IP a
-  mitad de ejecución no se reabsorbe hasta reiniciar el contenedor. El `last_ip` persistido aún no se
-  usa como fallback de conexión.
+- **Sin fallback por `last_ip`**: una cámara conocida solo se reconecta cuando el
+  descubrimiento vuelve a verla (≤60 s). No se construye una URL RTSP a partir de la IP
+  guardada, porque la ruta del stream varía según el fabricante.
+- **Sin comando remoto**: el `POST /rescan` solo es alcanzable desde la LAN del hogar. El
+  disparo desde la nube llegará con el uplink (ver [backlog.md](backlog.md)).
 - **Endpoints ONVIF asumidos** (`:10000` y rutas fijas): funciona con la cámara piloto (Tuya), pero
   otros modelos usan otros puertos/rutas. El siguiente slice los derivará de `XAddrs`.

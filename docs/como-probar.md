@@ -19,7 +19,7 @@ pip install -e ".[dev]"
 pytest -v
 ```
 
-Deberías ver **54 tests en verde**. Además, las mismas puertas que corren en CI:
+Deberías ver **100 tests en verde**. Además, las mismas puertas que corren en CI:
 
 ```bash
 ruff check src tests
@@ -141,6 +141,28 @@ docker compose logs -f
 El contenedor usa `network_mode: host` (necesario para el multicast ONVIF) y
 `restart: unless-stopped` (se relanza tras un corte de luz).
 
+### 3.4 Forzar un escaneo de cámaras
+
+El hub re-descubre solo cada `discovery.interval_seconds`. Para dar de alta una cámara
+recién conectada sin esperar:
+
+```bash
+export VITAHUB_ADMIN_TOKEN=$(openssl rand -hex 32)   # antes de arrancar el hub
+curl -X POST -H "Authorization: Bearer $VITAHUB_ADMIN_TOKEN" \
+  http://127.0.0.1:8787/rescan
+```
+
+Respuesta esperada:
+
+```json
+{"found":2,"added":[{"id":"onvif-b","name":"camera-2","ip":"192.168.1.191"}],
+ "ip_changed":[],"started":["onvif-b"],"cameras":2}
+```
+
+`found` son las cámaras vistas en ese escaneo, `added` las nuevas en el registro y
+`started` aquellas cuyo hilo se arrancó o relanzó. Códigos: `401` token incorrecto,
+`409` escaneo ya en curso, `500` fallo del descubrimiento (el detalle va al log).
+
 ---
 
 ## Diagnóstico rápido
@@ -152,12 +174,16 @@ El contenedor usa `network_mode: host` (necesario para el multicast ONVIF) y
 | `descubrimiento: 0 cámaras encontradas` | La cámara no está en la LAN, ONVIF apagado, o el multicast no llega (WiFi que aísla clientes; con Docker asegúrate de `network_mode: host`). |
 | `cam ... no abre, reintento en Ns` en bucle | La cámara se descubrió pero el RTSP no abre: credencial incorrecta, ruta/puerto RTSP distintos, o la cámara requiere auth que no cuadra. |
 | No salen eventos aunque hay alguien | ¿`detector: stub`? (no emite). ¿confianza muy alta? Baja `confidence`. ¿Muy poca resolución? Prueba `stream: main`. |
-| Una cámara nueva no aparece | El descubrimiento es solo al arranque en esta versión: `docker compose restart`. |
+| Una cámara nueva no aparece | Espera a `discovery.interval_seconds` (60 s) o dispara `POST /rescan`. Si sigue sin salir, el problema es de descubrimiento (ONVIF/red), no de registro. |
+| `POST /rescan` da 401 | El token de la cabecera no coincide con `VITAHUB_ADMIN_TOKEN`. |
+| `POST /rescan` no conecta | El hub arrancó sin `VITAHUB_ADMIN_TOKEN` (mira el log `control HTTP deshabilitado`), o el puerto 8787 está ocupado por otro servicio del Jetson. |
+| `POST /rescan` da 409 | Ya hay un escaneo en curso; reintenta en unos segundos. |
 | `OSError: Read-only file system: '/app'` al arrancar en local | `VITAHUB_WEIGHTS` apunta a la ruta del contenedor (`/app/models/...`). En local: `export VITAHUB_WEIGHTS=yolo11n.pt` (o usa `detector: stub`). |
 
 ## Verificación previa a integrar (checklist)
 
-- [ ] `pytest -v` → 54 verdes.
+- [ ] `pytest -v` → 100 verdes.
 - [ ] `ruff check src tests` y `mypy` limpios.
 - [ ] Arranque en seco (`stub`): descubre o avisa de 0 cámaras, sin caerse.
 - [ ] Extremo a extremo con cámara real: `person_detected` al entrar y `person_absent` al salir.
+- [ ] Conectar una cámara con el hub ya corriendo: aparece sola en ≤60 s (o al instante con `POST /rescan`), sin reiniciar el contenedor.

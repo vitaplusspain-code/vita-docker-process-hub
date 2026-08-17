@@ -6,20 +6,20 @@ condiciona el siguiente. Orden aproximado de prioridad.
 
 ## Próximo slice (mayor impacto)
 
-### 1. Re-descubrimiento periódico + fallback por `last_ip`
-Hoy el descubrimiento ONVIF corre **solo al arranque** (`app.py:run()`). Consecuencias:
-- Una cámara que aparece tarde (aún arrancando cuando lo hace el hub) o que **cambia de IP**
-  a mitad de ejecución no se reabsorbe hasta reiniciar el contenedor.
-- El `last_ip` persistido en el registro (cuyo propósito es sobrevivir reinicios) **nunca se usa**
-  para conectar: los workers se crean solo a partir de la lista descubierta en vivo.
+### 1. ~~Re-descubrimiento periódico~~ — HECHO (slice de 2026-08-17)
 
-Trabajo: un bucle de re-descubrimiento periódico (spec §5 pide ~60s, ya hay
-`discovery.interval_seconds` reservado en la config), que reconcilie el registro en caliente y
-arranque/actualice workers; y, para cámaras conocidas pero no descubiertas en ese ciclo, construir
-una URL RTSP de fallback desde `last_ip`.
+El hub re-descubre cada `discovery.interval_seconds` y admite un `POST /rescan` en LAN.
+Ver `docs/superpowers/specs/2026-08-17-rescan-camaras-design.md`.
 
-Mientras tanto (documentado en el README): una cámara añadida con el hub ya corriendo requiere
-`docker compose restart`.
+**Descartado con motivo — fallback RTSP por `last_ip`:** construir la URL del stream desde
+la IP guardada obliga a adivinar la ruta, que cambia con cada fabricante (la misma
+fragilidad del `:10000` hardcodeado del punto 2). Con rescan periódico, una cámara conocida
+que vuelve se recupera sola por descubrimiento, que devuelve la URI real. Si algún día una
+cámara resultara indescubrible pero alcanzable, se reabre.
+
+**Pendiente relacionado — comando remoto:** el disparo de rescan desde la nube (app del
+técnico fuera del hogar) necesita el uplink del punto 3. La costura está lista: el downlink
+solo tiene que llamar a `RescanService.run_once()`.
 
 ### 2. Endpoints ONVIF derivados de `XAddrs` / `GetServices`
 `discovery/onvif.py` **hardcodea** `http://{ip}:10000/onvif/device_service` y asume la ruta del
