@@ -119,10 +119,16 @@ Por cada cámara habilitada con URI resuelta se lanza un hilo *daemon* que:
 
 ### 5. Salud y apagado
 - El bucle principal refresca `/data/heartbeat` cada 5 s; el `HEALTHCHECK` de Docker
-  (`scripts/healthcheck.py`) lo considera sano si el fichero tiene <60 s. Si el proceso se cuelga,
-  Docker lo reinicia.
+  (`scripts/healthcheck.py`) lo considera sano si el fichero tiene <60 s.
+- **El `HEALTHCHECK` solo señala el estado, no lo remedia.** `restart: unless-stopped` reinicia el
+  contenedor cuando el proceso **sale**; un `HEALTHCHECK` fallido solo lo marca `unhealthy` en
+  `docker ps`. Docker Engine en solitario **no** recrea un contenedor `unhealthy` por sí solo (eso lo
+  hacen Swarm o Kubernetes). Si el proceso se cuelga de verdad (sigue vivo pero no avanza), la
+  monitorización de esa vivienda queda muerta hasta que algo externo actúe — y nadie se entera. Es
+  una decisión de despliegue pendiente (watchdog real), ver [backlog.md](backlog.md).
 - El rescan periódico corre en **su propio hilo**: así el latido nunca depende de lo que
-  tarde un descubrimiento, y un `discover()` lento no provoca un reinicio en falso.
+  tarde un descubrimiento, y un `discover()` lento no hace que el healthcheck marque el
+  contenedor `unhealthy` en falso.
 - Aun así, el `HEALTHCHECK` da un margen de arranque (`--start-period=180s`) para que la
   carga de YOLO y un primer descubrimiento lento no cuenten como fallo antes de que el
   hub llegue a latir. Al apagar, `docker-compose.yml` fija `stop_grace_period: 30s` —

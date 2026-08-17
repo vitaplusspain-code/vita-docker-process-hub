@@ -8,6 +8,18 @@ services:
     # que Docker mande SIGKILL; el valor por defecto de Docker (10s) se
     # queda corto para el peor caso.
     stop_grace_period: 30s
+    # Tope de logs: el driver json-file por defecto NO limita el tamaño del
+    # stdout de eventos, y este aparato está pensado para correr años
+    # desatendido. Además, desde este slice cada petición rechazada a
+    # POST /rescan (alcanzable sin credencial desde la WiFi del hogar)
+    # escribe una línea de log: sin tope, un vecino tocando el puerto puede
+    # hacer crecer los logs sin límite. 5 ficheros de 10 MB (50 MB total) es
+    # margen de sobra para meses de operación normal.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     environment:
       VITAHUB_ONVIF_USER: ${VITAHUB_ONVIF_USER:?falta usuario ONVIF}
       VITAHUB_ONVIF_PASSWORD: ${VITAHUB_ONVIF_PASSWORD:?falta contraseña ONVIF}

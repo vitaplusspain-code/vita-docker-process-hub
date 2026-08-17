@@ -179,6 +179,57 @@ def test_handler_has_socket_timeout():
     assert handler_class.timeout == 10
 
 
+def test_put_is_404_empty(server_factory):
+    """Método sin do_<METODO>: por defecto BaseHTTPRequestHandler contesta 501
+    con cuerpo HTML (revela detalles). El diseño exige el mismo 404 vacío que
+    el resto de rutas/métodos no contemplados."""
+    base = server_factory(_FakeService(_ok_result()))
+    request = urllib.request.Request(f"{base}/rescan", method="PUT", data=b"")
+
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        urllib.request.urlopen(request, timeout=5)
+
+    assert exc.value.code == 404
+    assert exc.value.read() == b""
+
+
+def test_delete_is_404_empty(server_factory):
+    base = server_factory(_FakeService(_ok_result()))
+    request = urllib.request.Request(f"{base}/rescan", method="DELETE")
+
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        urllib.request.urlopen(request, timeout=5)
+
+    assert exc.value.code == 404
+    assert exc.value.read() == b""
+
+
+def test_no_response_leaks_a_server_header(server_factory):
+    """Ninguna respuesta (200, 401 o 404) debe llevar una cabecera Server que
+    revele BaseHTTPServer o la versión de Python a la WiFi del hogar."""
+    service = _FakeService(_ok_result())
+    base = server_factory(service)
+
+    with _post(f"{base}/rescan", token="secreto") as response:
+        header = response.headers.get("Server") or ""
+    assert "Python" not in header
+    assert "BaseHTTP" not in header
+
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        _post(f"{base}/rescan", token="incorrecto")
+    header = exc.value.headers.get("Server") or ""
+    assert "Python" not in header
+    assert "BaseHTTP" not in header
+
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        urllib.request.urlopen(
+            urllib.request.Request(f"{base}/rescan", method="PUT", data=b""), timeout=5
+        )
+    header = exc.value.headers.get("Server") or ""
+    assert "Python" not in header
+    assert "BaseHTTP" not in header
+
+
 def test_server_uses_daemon_threads():
     """Sin daemon_threads, una petición en vuelo en el momento del shutdown()
     (hilo por request de ThreadingMixIn) retrasaría o impediría la salida

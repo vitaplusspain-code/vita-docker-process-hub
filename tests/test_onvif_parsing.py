@@ -1,5 +1,6 @@
 from vitahub.discovery.onvif import (
     build_probe,
+    dedupe_by_id,
     parse_probe_matches,
     parse_profile_tokens,
     parse_serial,
@@ -7,6 +8,7 @@ from vitahub.discovery.onvif import (
     select_main_sub,
     wsse_header,
 )
+from vitahub.registry import DiscoveredCamera
 
 # GetProfilesResponse realista (cámara AltoBeam/Tuby): cada <trt:Profiles> trae
 # su token de perfil, pero también tokens anidados de configuraciones. Solo los
@@ -97,3 +99,20 @@ def test_select_main_sub_empty():
 
 def test_select_main_sub_none_at_index_zero():
     assert select_main_sub([None, "rtsp://b"]) == ("", "rtsp://b")
+
+
+def test_dedupe_by_id_keeps_first_and_drops_same_id_other_ip():
+    a = DiscoveredCamera(id="onvif-x", ip="10.0.0.5", rtsp_main="rtsp://a", rtsp_sub="rtsp://a")
+    b = DiscoveredCamera(id="onvif-x", ip="10.0.0.9", rtsp_main="rtsp://b", rtsp_sub="rtsp://b")
+    result = dedupe_by_id([a, b])
+    assert result == [a]
+
+
+def test_dedupe_by_id_no_duplicates_is_unchanged():
+    a = DiscoveredCamera(id="onvif-x", ip="10.0.0.5", rtsp_main="rtsp://a", rtsp_sub="rtsp://a")
+    b = DiscoveredCamera(id="onvif-y", ip="10.0.0.9", rtsp_main="rtsp://b", rtsp_sub="rtsp://b")
+    assert dedupe_by_id([a, b]) == [a, b]
+
+
+def test_dedupe_by_id_empty():
+    assert dedupe_by_id([]) == []

@@ -53,7 +53,9 @@ def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
     # sobrevive con la marca de tiempo de ANTES del apagón. Sin este toque
     # aquí, el healthcheck vería ese latido caducado mientras el hub todavía
     # está cargando YOLO o sondeando ONVIF (nada de eso tiene tope global) y
-    # Docker reiniciaría un hub que está perfectamente vivo.
+    # el contenedor quedaría marcado `unhealthy` pese a estar perfectamente
+    # vivo. (El HEALTHCHECK solo señala el estado; no lo remedia — ver
+    # docs/backlog.md.)
     _touch_heartbeat()
 
     detector = build_detector(cfg.inference, weights_path)
@@ -76,7 +78,8 @@ def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
     httpd = _start_control_server_safe(service, env.get("VITAHUB_ADMIN_TOKEN", ""), admin_port(env))
 
     # En su propio hilo: si el rescan compartiera hilo con el heartbeat, un
-    # discover() lento dejaría de latir y Docker reiniciaría un hub sano.
+    # discover() lento dejaría de latir y el contenedor quedaría marcado
+    # `unhealthy` pese a estar sano (el HEALTHCHECK señala, no remedia).
     threading.Thread(
         target=_rescan_loop,
         args=(service, cfg.discovery.interval_seconds, stop),

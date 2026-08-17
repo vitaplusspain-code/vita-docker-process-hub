@@ -75,6 +75,24 @@ def _build_handler(
         def do_GET(self) -> None:
             self._respond(404)
 
+        def send_error(
+            self, code: int, message: str | None = None, explain: str | None = None
+        ) -> None:
+            # Intercepta el camino de error POR DEFECTO de BaseHTTPRequestHandler
+            # (p. ej. un método sin do_<METODO>, que por defecto contesta 501
+            # con un cuerpo HTML que revela detalles). El diseño exige 404
+            # vacío para cualquier ruta o método no contemplado, igual que el
+            # resto de rutas no válidas — sin filtrar nada a un cliente no
+            # autenticado en la WiFi del hogar.
+            self._respond(404)
+
+        def version_string(self) -> str:
+            # Por defecto expone "BaseHTTP/x.y Python/a.b.c" en la cabecera
+            # Server de TODA respuesta (incluida un 401): revela la versión
+            # exacta de Python a cualquiera en la WiFi del hogar. No hay nada
+            # que ganar exponiéndolo aquí.
+            return ""
+
         def _authorized(self) -> bool:
             header = self.headers.get("Authorization", "")
             prefix = "Bearer "

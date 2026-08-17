@@ -36,6 +36,23 @@ service, y resolver el media service vía capabilities/`GetServices` en vez de a
 - Telemetría de conexión (F): emitir `camera_connected`/`camera_disconnected`/`hub_online` por el
   sink cuando exista consumidor.
 
+### 4. Watchdog real de proceso (decisión pendiente)
+`restart: unless-stopped` solo actúa cuando el proceso **sale**; el `HEALTHCHECK` de Docker
+únicamente marca el contenedor `unhealthy` — Docker Engine en solitario no lo recrea por eso (eso
+es Swarm/Kubernetes). Si el proceso se cuelga de verdad (queda vivo pero no avanza: hilo bloqueado,
+deadlock...), hoy **nada** lo reinicia solo. Para un aparato desatendido en casa de población
+vulnerable, un cuelgue silencioso significa una habitación sin vigilancia y nadie enterándose.
+Opciones a decidir (no es una decisión de este repo, es de despliegue):
+- **`docker-autoheal`** (o equivalente): un contenedor sidecar que reinicia lo que Docker marca
+  `unhealthy`. Más simple, corre en el propio Jetson, sin tocar el host.
+- **`systemd` en el Jetson**: unidad con `Restart=` vigilando el propio `docker run`/`compose`, o un
+  watchdog a nivel de host que compruebe `/data/heartbeat` directamente.
+- **Supervisión desde la nube**: si el hub deja de reportar (cuando exista el uplink del punto 3),
+  la nube puede pedir un reinicio remoto o alertar a un humano — más lento pero con visibilidad
+  centralizada.
+No introducir ningún mecanismo hasta decidir cuál encaja con el despliegue real (uno o varios
+Jetsons por hogar, acceso remoto disponible o no, etc.).
+
 ## Robustez / calidad (menor, oportunista)
 
 - **Cobertura de tests diferida:**
@@ -47,8 +64,6 @@ service, y resolver el media service vía capabilities/`GetServices` en vez de a
   - smoke test: cross-chequear el literal de versión.
 - **`config`:** `bool("false")` mis-coerce a `True` (solo afecta a un `"false"` entrecomillado; el
   `false` nativo de YAML va bien). Considerar un coercer string-aware.
-- **`registry`:** un `id` duplicado dentro de un mismo `discovered` genera un evento `ip_changed`
-  espurio (el dedup pertenece a la capa de descubrimiento).
 - **`event_engine`:** `_required_hold(old, new)` no usa `old` (parámetro muerto).
 - **`app.py`:** `cap` se libera tras el `stop.wait(delay)` del backoff en vez de antes (higiene de
   recursos, no bug); `run()` no tiene cobertura de tests (código de integración).

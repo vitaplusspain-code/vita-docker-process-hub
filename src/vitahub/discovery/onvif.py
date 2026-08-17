@@ -103,6 +103,35 @@ def select_main_sub(uris: list[str | None]) -> tuple[str, str]:
     return main, sub or main
 
 
+def dedupe_by_id(cameras: list[DiscoveredCamera]) -> list[DiscoveredCamera]:
+    """Deduplica por `id`, quedándose con la primera aparición.
+
+    Función pura (sin red) para poder testearla sin LAN/hardware, siguiendo
+    el patrón de este módulo: parsers puros testeados, orquestación de red
+    no. Dos cámaras del mismo modelo barato a veces comparten `SerialNumber`
+    en el firmware, o una misma cámara responde por dos IPs (multihoming).
+    Sin deduplicar, cada rescan periódico ve una `ip_changed` distinta para
+    el mismo `id`, el registro nunca converge y el supervisor para/relanza
+    ese worker en cada ciclo.
+    """
+    seen: dict[str, DiscoveredCamera] = {}
+    result: list[DiscoveredCamera] = []
+    for cam in cameras:
+        primera = seen.get(cam.id)
+        if primera is not None:
+            _log.warning(
+                "descubrimiento: id duplicado %s — se descarta la IP %s "
+                "(ya asignada a %s)",
+                cam.id,
+                cam.ip,
+                primera.ip,
+            )
+            continue
+        seen[cam.id] = cam
+        result.append(cam)
+    return result
+
+
 def discover(creds: Credentials, timeout: float = 3.0) -> list[DiscoveredCamera]:
     """Orquestación de red. No cubierto por unit tests (requiere LAN/hardware)."""
     ips = _probe_network(timeout)
@@ -114,7 +143,7 @@ def discover(creds: Credentials, timeout: float = 3.0) -> list[DiscoveredCamera]
                 cameras.append(cam)
         except OSError as exc:  # red/timeout de una cámara concreta
             _log.warning("no se pudo interrogar %s: %s", ip, exc)
-    return cameras
+    return dedupe_by_id(cameras)
 
 
 def _probe_network(timeout: float) -> list[str]:

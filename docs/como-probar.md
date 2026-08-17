@@ -19,7 +19,7 @@ pip install -e ".[dev]"
 pytest -v
 ```
 
-Deberías ver **100 tests en verde**. Además, las mismas puertas que corren en CI:
+Deberías ver **111 tests en verde**. Además, las mismas puertas que corren en CI:
 
 ```bash
 ruff check src tests
@@ -163,6 +163,14 @@ Respuesta esperada:
 `started` aquellas cuyo hilo se arrancó o relanzó. Códigos: `401` token incorrecto,
 `409` escaneo ya en curso, `500` fallo del descubrimiento (el detalle va al log).
 
+> **Importante — usa un timeout generoso al llamar a este endpoint.** `discover()` no tiene un
+> tope de tiempo global (es trabajo del siguiente slice de ONVIF, ver `docs/backlog.md`): en el
+> peor caso — varias IPs que contestan al multicast pero no hablan ONVIF de verdad, más 8 s por
+> cada llamada SOAP — un escaneo puede tardar **minutos**. Un cliente (p. ej. la app del técnico)
+> con un timeout corto verá lo que parece un cuelgue, reintentará y recibirá `409`. Un `409` **no
+> es un fallo**: significa "ya hay un escaneo en marcha, espera y consulta el resultado en los
+> logs (`docker compose logs -f`)", no que algo se rompió.
+
 ---
 
 ## Diagnóstico rápido
@@ -177,12 +185,12 @@ Respuesta esperada:
 | Una cámara nueva no aparece | Espera a `discovery.interval_seconds` (60 s) o dispara `POST /rescan`. Si sigue sin salir, el problema es de descubrimiento (ONVIF/red), no de registro. |
 | `POST /rescan` da 401 | El token de la cabecera no coincide con `VITAHUB_ADMIN_TOKEN`. |
 | `POST /rescan` no conecta | El hub arrancó sin `VITAHUB_ADMIN_TOKEN` (mira el log `control HTTP deshabilitado`), o el puerto 8787 está ocupado por otro servicio del Jetson. |
-| `POST /rescan` da 409 | Ya hay un escaneo en curso; reintenta en unos segundos. |
+| `POST /rescan` da 409 | No es un error: ya hay un escaneo en curso (puede tardar minutos, ver arriba). Espera y consulta el log, no reintentes en bucle corto. |
 | `OSError: Read-only file system: '/app'` al arrancar en local | `VITAHUB_WEIGHTS` apunta a la ruta del contenedor (`/app/models/...`). En local: `export VITAHUB_WEIGHTS=yolo11n.pt` (o usa `detector: stub`). |
 
 ## Verificación previa a integrar (checklist)
 
-- [ ] `pytest -v` → 100 verdes.
+- [ ] `pytest -v` → 111 verdes.
 - [ ] `ruff check src tests` y `mypy` limpios.
 - [ ] Arranque en seco (`stub`): descubre o avisa de 0 cámaras, sin caerse.
 - [ ] Extremo a extremo con cámara real: `person_detected` al entrar y `person_absent` al salir.

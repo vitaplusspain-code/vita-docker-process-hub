@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -69,6 +70,36 @@ def test_save_cameras_roundtrip(tmp_path):
     assert reloaded.hub_id == "hub-3f9a"  # resto preservado
 
 
+def test_save_cameras_refuses_when_file_is_empty(tmp_path):
+    path = tmp_path / "hub.yaml"
+    path.write_text("")
+    with pytest.raises(ConfigError, match="hub_id"):
+        save_cameras(path, [])
+    assert path.read_text() == ""  # no se cementó una config inválida
+
+
+def test_save_cameras_refuses_when_hub_id_missing(tmp_path):
+    path = tmp_path / "hub.yaml"
+    path.write_text("cameras: []\n")
+    with pytest.raises(ConfigError, match="hub_id"):
+        save_cameras(path, [])
+    assert path.read_text() == "cameras: []\n"  # sin tocar
+
+
+def test_save_cameras_fsyncs_temp_file_before_replace(tmp_path, monkeypatch):
+    path = _write(tmp_path, VALID_YAML)
+    fsynced_fds = []
+    real_fsync = os.fsync
+
+    def _spy_fsync(fd):
+        fsynced_fds.append(fd)
+        real_fsync(fd)
+
+    monkeypatch.setattr("vitahub.config.os.fsync", _spy_fsync)
+    save_cameras(path, [])
+    assert fsynced_fds  # se llamó a fsync antes del os.replace
+
+
 def test_non_mapping_camera_raises(tmp_path):
     with pytest.raises(ConfigError):
         load_config(_write(tmp_path, "hub_id: h\ncameras:\n  - oops\n"), ENV)
@@ -91,3 +122,17 @@ def test_non_positive_interval_is_rejected(tmp_path):
     path.write_text("hub_id: hub-x\ndiscovery:\n  interval_seconds: 0\n")
     with pytest.raises(ConfigError, match="interval_seconds"):
         load_config(path, {"VITAHUB_ONVIF_USER": "u", "VITAHUB_ONVIF_PASSWORD": "p"})
+
+
+def test_invalid_stream_value_is_rejected(tmp_path):
+    path = tmp_path / "hub.yaml"
+    path.write_text("hub_id: hub-x\ninference:\n  stream: sub_stream\n")
+    with pytest.raises(ConfigError, match="stream"):
+        load_config(path, ENV)
+
+
+def test_valid_stream_values_are_accepted(tmp_path):
+    path = tmp_path / "hub.yaml"
+    path.write_text("hub_id: hub-x\ninference:\n  stream: main\n")
+    cfg = load_config(path, ENV)
+    assert cfg.inference.stream == "main"

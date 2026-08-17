@@ -112,6 +112,18 @@ def load_config(path: Path, env: Mapping[str, str]) -> HubConfig:
     except (ValueError, TypeError) as exc:
         raise ConfigError("Campo 'inference.confidence' no es numérico") from exc
 
+    stream = str(inf_raw.get("stream", "substream"))
+    if stream not in ("main", "substream"):
+        # Cualquier valor no reconocido cae en el stream principal en
+        # rescan.py (RescanService._rescan compara contra "substream"), sin
+        # ni una línea de log: una errata en config/hub.example.yaml
+        # ("sub_stream", "Substream") dobla la carga de decodificación e
+        # inferencia en el Jetson en silencio. Se rechaza en vez de adivinar.
+        raise ConfigError(
+            "Campo 'inference.stream' debe ser 'main' o 'substream' "
+            f"(recibido: {stream!r})"
+        )
+
     return HubConfig(
         hub_id=str(hub_id),
         discovery=DiscoveryConfig(interval_seconds=interval_seconds),
@@ -119,7 +131,7 @@ def load_config(path: Path, env: Mapping[str, str]) -> HubConfig:
             detector=str(inf_raw.get("detector", "person_yolo")),
             sample_fps=sample_fps,
             confidence=confidence,
-            stream=str(inf_raw.get("stream", "substream")),
+            stream=stream,
         ),
         cameras=_cameras_from_raw(raw.get("cameras") or []),
         credentials=credentials,
@@ -128,6 +140,16 @@ def load_config(path: Path, env: Mapping[str, str]) -> HubConfig:
 
 def save_cameras(path: Path, cameras: list[Camera]) -> None:
     raw = yaml.safe_load(path.read_text()) or {}
+    # Nos negamos a guardar si lo releído no es una config válida (fichero
+    # vacío, corrupto, o sin 'hub_id'): escribir aquí cementaría un hub.yaml
+    # inválido permanente (load_config fallaría en cada arranque siguiente,
+    # con restart: unless-stopped eso es un bucle de reinicio infinito).
+    if not isinstance(raw, dict) or not raw.get("hub_id"):
+        raise ConfigError(
+            f"No se guarda el registro de cámaras: {path} está vacío, corrupto "
+            "o sin 'hub_id' — se descarta el guardado para no cementar una "
+            "config inválida"
+        )
     raw["cameras"] = [
         {"id": c.id, "name": c.name, "last_ip": c.last_ip, "enabled": c.enabled}
         for c in cameras
@@ -138,6 +160,12 @@ def save_cameras(path: Path, cameras: list[Camera]) -> None:
     try:
         with os.fdopen(fd, "w") as f:
             f.write(yaml.safe_dump(raw, sort_keys=False, allow_unicode=True))
+            # flush + fsync antes del replace: sin esto, un corte de luz justo
+            # después de os.replace puede dejar el contenido del fichero
+            # temporal solo en el buffer de la libc/el kernel, no en la eMMC,
+            # y el hub.yaml resultante queda truncado tras el reinicio.
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, path)
     except BaseException:
         try:
