@@ -151,3 +151,29 @@ def test_token_is_registered_for_log_redaction(monkeypatch, server_factory):
 )
 def test_admin_port_parsing(env, expected):
     assert admin_port(env) == expected
+
+
+def test_malformed_authorization_header_is_rejected(server_factory):
+    """Cabecera Authorization con bytes no ASCII se trata como credencial
+    inválida (401), sin excepción que cierre la conexión silenciosamente."""
+    service = _FakeService(_ok_result())
+    base = server_factory(service)
+
+    request = urllib.request.Request(f"{base}/rescan", method="POST", data=b"")
+    # Simulamos bytes no ASCII que causarían TypeError en compare_digest
+    request.add_header("Authorization", "Bearer \xff\xfe")
+
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        urllib.request.urlopen(request, timeout=5)
+
+    assert exc.value.code == 401
+    assert service.calls == 0  # no llegó a escanear
+
+
+def test_handler_has_socket_timeout():
+    """El handler debe tener timeout para evitar slow-loris attacks."""
+    from vitahub.control import _build_handler
+
+    handler_class = _build_handler(_FakeService(_ok_result()), "token")
+    assert hasattr(handler_class, "timeout")
+    assert handler_class.timeout == 10

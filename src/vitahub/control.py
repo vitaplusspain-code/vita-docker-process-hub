@@ -38,6 +38,11 @@ def _build_handler(
     service: _Rescannable, token: str
 ) -> type[BaseHTTPRequestHandler]:
     class _Handler(BaseHTTPRequestHandler):
+        # Socket timeout para evitar slow-loris: conexiones lentas o inertes
+        # no deben agotar hilos ni descriptores del proceso. Crítico porque
+        # el servidor es accesible desde la WiFi del cliente.
+        timeout = 10
+
         # Sin body ni parámetros: no hay nada que parsear, luego no hay
         # superficie de inyección.
         def do_POST(self) -> None:
@@ -76,7 +81,12 @@ def _build_handler(
             if not header.startswith(prefix):
                 return False
             # compare_digest evita filtrar el token por tiempo de comparación.
-            return hmac.compare_digest(header[len(prefix):], token)
+            # Capturamos errores de encoding (p. ej. bytes no ASCII) como
+            # credenciales inválidas, sin excepción.
+            try:
+                return hmac.compare_digest(header[len(prefix):], token)
+            except (TypeError, UnicodeDecodeError):
+                return False
 
         def _respond(
             self, code: int, payload: dict[str, object] | None = None
