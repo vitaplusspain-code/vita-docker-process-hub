@@ -53,6 +53,18 @@ Opciones a decidir (no es una decisión de este repo, es de despliegue):
 No introducir ningún mecanismo hasta decidir cuál encaja con el despliegue real (uno o varios
 Jetsons por hogar, acceso remoto disponible o no, etc.).
 
+### 5. Reserva DHCP por MAC en el protocolo de instalación
+El hub ya recuerda la URI RTSP de cada cámara, pero esa URI lleva la IP dentro. Si el router cambia
+la IP de una cámara **y** su ONVIF está apagado (firmware que lo desactiva al reiniciar), la URI
+recordada apunta a una IP muerta y solo queda el evento `camera_unreachable`. La defensa real no es
+código: es **fijar una reserva DHCP por MAC** en el router de cada hogar durante la instalación.
+Cinco minutos por casa y el problema desaparece de raíz.
+
+**Nota de compra, no de software:** la cámara piloto (Tuya) **desactiva ONVIF en cada reinicio**
+—medido el 2026-08-17: tras un ciclo de corriente, puerto 10000 cerrado y sonda multicast 0 de 6,
+con el RTSP intacto—. Si el modelo definitivo va a ser este, cada apagón de cada hogar dependerá de
+que el hub recuerde la URI. Una cámara con ONVIF estable elimina la clase entera de problemas.
+
 ## Robustez / calidad (menor, oportunista)
 
 - **Cobertura de tests diferida:**

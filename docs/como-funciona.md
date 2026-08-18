@@ -67,6 +67,7 @@ Dos ideas de diseño que conviene retener:
 | `ingest/rtsp.py` | Helpers puros (backoff, muestreo, watchdog), apertura de captura y credenciales en la URL. |
 | `inference/` | `Detector` (interfaz), `StubDetector` (tests), `PersonDetector` (YOLO). |
 | `analytics/event_engine.py` | Máquina de estados anti-parpadeo: detecciones → eventos. |
+| `analytics/connection_monitor.py` | Éxitos y fallos de conexión → eventos `camera_unreachable` / `camera_reachable`. |
 | `sinks/` | `EventSink` (interfaz) y `StdoutJsonSink` (salida JSON por stdout). |
 | `factory.py` | Construye el `Detector` según la config (`stub` / `person_yolo`). |
 | `worker.py` | `process_frame`: detecta, cuenta, alimenta el motor, emite por el sink. |
@@ -96,6 +97,16 @@ Dos ideas de diseño que conviene retener:
 > El registro solo se reescribe si hubo cambios. Una cámara que deja de verse **no** se
 > para: un probe multicast perdido no debe apagar una cámara que funciona.
 
+> **El registro guarda también cómo reconectar.** Junto al `last_ip` se persisten las dos URIs RTSP
+> que ONVIF resolvió (sin credenciales: se inyectan en memoria al conectar). Si en un rescan
+> posterior el descubrimiento no encuentra a esa cámara, el hub se conecta con la URI recordada.
+> Esto importa porque hay firmware —el de la cámara piloto, sin ir más lejos— que **desactiva ONVIF
+> en cada reinicio**: tras un corte de luz la cámara vuelve sirviendo vídeo pero sin responder al
+> descubrimiento, y sin la URI recordada el hub no tendría forma de reconectar.
+>
+> Lo descubierto gana siempre sobre lo recordado. Y esas URIs se pueden escribir a mano en
+> `hub.yaml`, que es la vía para cámaras sin ONVIF o para entornos donde el multicast no llega.
+
 ### 3. Un hilo por cámara (`_camera_loop`)
 Por cada cámara habilitada con URI resuelta se lanza un hilo *daemon* que:
 1. Abre la captura RTSP **forzando TCP** (`open_capture`; buffer mínimo).
@@ -116,6 +127,16 @@ Por cada cámara habilitada con URI resuelta se lanza un hilo *daemon* que:
   - `person_count_changed` — el conteo cambia entre valores no-cero y se estabiliza.
 - El evento se serializa **en un único punto** (`EventSink.emit`). Hoy `StdoutJsonSink` escribe una
   línea JSON por evento a **stdout**. (Esa es la costura del futuro `AwsSink`.)
+
+Además de los eventos de presencia, el hub emite **eventos de conexión**:
+
+- `camera_unreachable` (severidad `medium`) — la cámara lleva 5 minutos sin conseguir abrir el
+  stream. El payload trae `last_ip` y `minutes_down`. Se emite **una vez** por episodio.
+- `camera_reachable` (severidad `info`) — vuelve a conectar, y solo si antes se avisó de la caída.
+
+El umbral es holgado a propósito: un tirón de cable tarda ~30 s solo en que el watchdog de FFmpeg lo
+detecte, más el backoff. Por debajo de eso saldrían avisos falsos cada vez que alguien desenchufa
+algo.
 
 ### 5. Salud y apagado
 - El bucle principal refresca `/data/heartbeat` cada 5 s; el `HEALTHCHECK` de Docker
@@ -211,9 +232,10 @@ Orin, por **GPU/TensorRT**. La interfaz `Detector` es idéntica; cambia solo la 
 
 Documentadas en detalle en [backlog.md](backlog.md). Las de más impacto:
 
-- **Sin fallback por `last_ip`**: una cámara conocida solo se reconecta cuando el
-  descubrimiento vuelve a verla (≤60 s). No se construye una URL RTSP a partir de la IP
-  guardada, porque la ruta del stream varía según el fabricante.
+- **La URI recordada lleva la IP dentro**: si el router le cambia la IP a una cámara **y** su ONVIF
+  está apagado a la vez (firmware que lo desactiva al reiniciar), la URI recordada apunta a una IP
+  muerta y no hay forma automática de recuperarla — solo queda el evento `camera_unreachable`. La
+  defensa es una reserva DHCP por MAC en el router de cada hogar (ver [backlog.md](backlog.md)).
 - **Sin comando remoto**: el `POST /rescan` solo es alcanzable desde la LAN del hogar. El
   disparo desde la nube llegará con el uplink (ver [backlog.md](backlog.md)).
 - **Endpoints ONVIF asumidos** (`:10000` y rutas fijas): funciona con la cámara piloto (Tuya), pero

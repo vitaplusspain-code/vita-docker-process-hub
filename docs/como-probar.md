@@ -19,7 +19,7 @@ pip install -e ".[dev]"
 pytest -v
 ```
 
-Deberías ver **111 tests en verde**. Además, las mismas puertas que corren en CI:
+Deberías ver **139 tests en verde**. Además, las mismas puertas que corren en CI:
 
 ```bash
 ruff check src tests
@@ -148,10 +148,11 @@ El contenedor usa `network_mode: host` (necesario para el multicast ONVIF) y
 > contenedor alcanza el `:10000` ONVIF y el `:554` RTSP de una cámara de la LAN), lo único que no
 > atraviesa es el multicast.
 >
-> Consecuencia práctica: **en el Mac, prueba con cámaras arrancando en local** (§3.2), no en Docker.
-> Docker en el Mac sirve para validar el empaquetado, el arranque, el endpoint de control y el
-> healthcheck — no el descubrimiento. La prueba de Docker con cámaras se hace en el Jetson, que es
-> Linux nativo y donde esto funciona por diseño.
+> Consecuencia práctica: si quieres **descubrimiento** con cámara real, pruébalo en local (§3.2), no
+> en Docker sobre Mac. Docker en el Mac sirve para validar el empaquetado, el arranque, el endpoint
+> de control y el healthcheck — no el descubrimiento por multicast. La prueba de descubrimiento con
+> Docker se hace en el Jetson, que es Linux nativo y donde esto funciona por diseño. Para probar
+> **conexión e ingesta** con Docker en el Mac sin descubrimiento, declara la cámara a mano (§3.5).
 >
 > Añadido: en macOS el puerto de control tampoco es alcanzable desde el Mac con `network_mode:
 > host` (`curl` responde "Couldn't connect to server"). Para eso está `docker-compose.mac.yml`, que
@@ -161,9 +162,11 @@ El contenedor usa `network_mode: host` (necesario para el multicast ONVIF) y
 > docker compose -f docker-compose.yml -f docker-compose.mac.yml up
 > ```
 >
-> Si algún día hiciera falta descubrimiento real en Docker sobre Mac, la vía es cambiar el motor de
-> contenedores a uno con red *bridged* (Colima/Lima con `socket_vmnet`), que pone la VM en la LAN
-> con su propia IP. No lo arregla ninguna opción de `docker-compose.yml`.
+> Hay una salida sin cambiar de motor de contenedores: **declarar la cámara a mano** en
+> `./data/hub.yaml` con su URI RTSP (ver §3.5). El hub conecta sin descubrimiento alguno, así que
+> el multicast deja de hacer falta. Si aun así quisieras descubrimiento real en Docker sobre Mac, la
+> única vía es un motor con red *bridged* (Colima/Lima con `socket_vmnet`), que pone la VM en la LAN
+> con su propia IP.
 
 ### 3.4 Forzar un escaneo de cámaras
 
@@ -195,6 +198,30 @@ Respuesta esperada:
 > es un fallo**: significa "ya hay un escaneo en marcha, espera y consulta el resultado en los
 > logs (`docker compose logs -f`)", no que algo se rompió.
 
+### 3.5 Declarar una cámara a mano
+
+Sirve para cámaras sin ONVIF, para firmware que lo desactiva al reiniciar, y para entornos donde el
+multicast no llega (Docker sobre macOS, WiFi que aísla clientes). Añade a `hub.yaml`:
+
+```yaml
+cameras:
+- id: camara-salon            # identificador estable, lo eliges tú
+  name: salon
+  last_ip: 192.168.1.190
+  rtsp_main: rtsp://192.168.1.190:554/V_ENC_000
+  rtsp_sub: rtsp://192.168.1.190:554/V_ENC_001
+  enabled: true
+```
+
+**Sin credenciales en la URI**: el hub las inyecta desde `VITAHUB_ONVIF_USER` /
+`VITAHUB_ONVIF_PASSWORD` al conectar. Para averiguar la ruta correcta de tu cámara, consulta su
+ficha técnica; si no la tienes, un `DESCRIBE` por RTSP distingue una ruta que existe (`401
+Unauthorized`) de una que no (`404 Not Found`).
+
+Con `id` elegido a mano pierdes la identidad estable por número de serie: si un día esa cámara se
+descubre por ONVIF, entrará como una cámara **distinta**, con su `onvif-<serie>`. Úsalo para pruebas
+y para cámaras que nunca vayan a hablar ONVIF.
+
 ---
 
 ## Diagnóstico rápido
@@ -211,10 +238,11 @@ Respuesta esperada:
 | `POST /rescan` no conecta | El hub arrancó sin `VITAHUB_ADMIN_TOKEN` (mira el log `control HTTP deshabilitado`), o el puerto 8787 está ocupado por otro servicio del Jetson. |
 | `POST /rescan` da 409 | No es un error: ya hay un escaneo en curso (puede tardar minutos, ver arriba). Espera y consulta el log, no reintentes en bucle corto. |
 | `OSError: Read-only file system: '/app'` al arrancar en local | `VITAHUB_WEIGHTS` apunta a la ruta del contenedor (`/app/models/...`). En local: `export VITAHUB_WEIGHTS=yolo11n.pt` (o usa `detector: stub`). |
+| Sale `camera_unreachable` | La cámara lleva 5 min sin conectar: comprueba que está encendida, que su IP no ha cambiado y que la URI del registro sigue siendo válida. |
 
 ## Verificación previa a integrar (checklist)
 
-- [ ] `pytest -v` → 111 verdes.
+- [ ] `pytest -v` → 139 verdes.
 - [ ] `ruff check src tests` y `mypy` limpios.
 - [ ] Arranque en seco (`stub`): descubre o avisa de 0 cámaras, sin caerse.
 - [ ] Extremo a extremo con cámara real: `person_detected` al entrar y `person_absent` al salir.
