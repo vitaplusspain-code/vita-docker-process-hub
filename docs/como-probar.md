@@ -201,11 +201,31 @@ Respuesta esperada:
 ### 3.5 Declarar una cámara a mano
 
 Sirve para cámaras sin ONVIF, para firmware que lo desactiva al reiniciar, y para entornos donde el
-multicast no llega (Docker sobre macOS, WiFi que aísla clientes). Añade a `hub.yaml`:
+multicast no llega (Docker sobre macOS, WiFi que aísla clientes). La entrada va **dentro de la lista
+`cameras:` que `hub.yaml` ya tiene** — no crees una segunda clave `cameras:` al final del fichero.
+En cuanto el hub ha descubierto algo una vez, esa clave ya existe y ya tiene cámaras dentro; un YAML
+con `cameras:` repetido no da error, se queda **en silencio** con el último bloque, así que pegar
+uno nuevo puede borrar el registro de cámaras descubiertas (con sus URIs recordadas) o tu cámara
+manual, según cuál quede segunda. Fichero completo, con una cámara ya descubierta y la entrada nueva
+añadida a la misma lista:
 
 ```yaml
+hub_id: hub-3f9a
+discovery:
+  interval_seconds: 60
+inference:
+  detector: person_yolo
+  sample_fps: 2
+  confidence: 0.4
+  stream: substream
 cameras:
-- id: camara-salon            # identificador estable, lo eliges tú
+- id: onvif-szjsa81a81e6adf9    # cámara ya descubierta — no tocar
+  name: camera-1
+  last_ip: 192.168.1.180
+  rtsp_main: rtsp://192.168.1.180:554/V_ENC_000
+  rtsp_sub: rtsp://192.168.1.180:554/V_ENC_001
+  enabled: true
+- id: camara-salon               # la entrada nueva, en la MISMA lista
   name: salon
   last_ip: 192.168.1.190
   rtsp_main: rtsp://192.168.1.190:554/V_ENC_000

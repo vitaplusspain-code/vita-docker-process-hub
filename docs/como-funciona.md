@@ -48,7 +48,8 @@ Dos ideas de diseño que conviene retener:
 
 - **Dos costuras enchufables.** `Detector` (visión) y `EventSink` (salida) son interfaces
   abstractas. Hoy hay `StubDetector`/`PersonDetector` y `StdoutJsonSink`; mañana entran detección de
-  caídas o un `AwsSink` **sin tocar el resto**.
+  caídas de persona (visión avanzada, subsistema C del spec del primer slice) o un `AwsSink` **sin
+  tocar el resto**.
 - **Identidad de cámara por serie ONVIF, no por IP.** Si el router le cambia la IP a una cámara tras
   un corte, el hub la reconoce como la misma y no la duplica.
 
@@ -176,7 +177,9 @@ Una línea JSON por evento en stdout:
 ```
 
 - `camera_id` es la serie ONVIF (estable ante cambios de IP).
-- `severity` es `info` para presencia — el hueco donde una futura caída pondría `high`/`critical`.
+- `severity` es `info` para presencia; `medium` ya existe para los eventos de conexión
+  (`camera_unreachable`) — `high`/`critical` siguen sin usarse, reservados para una futura caída de
+  persona (aún no implementada, ver arriba).
 - `schema_version` permite que el `AwsSink` futuro evolucione el formato sin romper consumidores.
 
 ## Separación stdout / stderr
