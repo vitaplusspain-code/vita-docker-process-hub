@@ -8,6 +8,7 @@ from pathlib import Path
 from vitahub.config import Credentials, HubConfig, save_cameras
 from vitahub.ingest.rtsp import with_credentials
 from vitahub.logging_setup import get_logger
+from vitahub.models import Camera
 from vitahub.registry import DiscoveredCamera, reconcile
 from vitahub.supervisor import CameraSupervisor
 
@@ -77,14 +78,7 @@ class RescanService:
             except Exception:  # noqa: BLE001 — persistir no debe frenar los workers
                 _log.exception("rescan: no se pudo persistir el registro")
 
-        uris = {
-            dc.id: with_credentials(
-                dc.rtsp_sub if self._cfg.inference.stream == "substream" else dc.rtsp_main,
-                self._cfg.credentials.onvif_user,
-                self._cfg.credentials.onvif_password,
-            )
-            for dc in discovered
-        }
+        uris = self._uris_for(cameras, discovered)
         applied = self._supervisor.apply(cameras, uris)
 
         by_id = {c.id: c for c in cameras}
@@ -108,3 +102,30 @@ class RescanService:
             started=started,
             cameras=len(cameras),
         )
+
+    def _uris_for(
+        self, cameras: list[Camera], discovered: list[DiscoveredCamera]
+    ) -> dict[str, str]:
+        """URI de conexión por cámara. Lo descubierto gana; lo recordado es la red de seguridad.
+
+        Una cámara conocida que no aparece en este ciclo se conecta con la URI
+        que ONVIF resolvió en su día: es lo que permite reconectar tras un corte
+        de luz cuando el firmware de la cámara vuelve con ONVIF apagado.
+        """
+        substream = self._cfg.inference.stream == "substream"
+        by_disc = {dc.id: dc for dc in discovered}
+        uris: dict[str, str] = {}
+        for camera in cameras:
+            dc = by_disc.get(camera.id)
+            if dc is not None:
+                raw = dc.rtsp_sub if substream else dc.rtsp_main
+            else:
+                raw = camera.rtsp_sub if substream else camera.rtsp_main
+            if not raw:
+                continue
+            uris[camera.id] = with_credentials(
+                raw,
+                self._cfg.credentials.onvif_user,
+                self._cfg.credentials.onvif_password,
+            )
+        return uris

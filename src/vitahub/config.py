@@ -63,8 +63,8 @@ def _cameras_from_raw(raw: list[dict[str, object]]) -> list[Camera]:
                     name=str(entry["name"]),
                     last_ip=str(entry["last_ip"]),
                     enabled=bool(entry.get("enabled", True)),
-                    rtsp_main=str(entry.get("rtsp_main", "")),
-                    rtsp_sub=str(entry.get("rtsp_sub", "")),
+                    rtsp_main=str(entry.get("rtsp_main") or ""),
+                    rtsp_sub=str(entry.get("rtsp_sub") or ""),
                 )
             )
         except KeyError as exc:

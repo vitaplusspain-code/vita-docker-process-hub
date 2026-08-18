@@ -218,3 +218,64 @@ def test_supervisor_apply_failure_returns_error(tmp_path):
     result = service.run_once()
 
     assert result.status == "error"
+
+
+def test_remembered_uri_is_used_when_camera_is_not_discovered(tmp_path):
+    """El caso del corte de luz: la cámara vuelve sin ONVIF, pero sirve vídeo."""
+    path = _config_file(tmp_path)
+    cfg = _cfg(cameras=[Camera(
+        id="onvif-a", name="salon", last_ip="10.0.0.5",
+        rtsp_main="rtsp://10.0.0.5:554/main", rtsp_sub="rtsp://10.0.0.5:554/sub",
+    )])
+    sup = _FakeSupervisor()
+    service = RescanService(cfg, path, sup, lambda creds: [])
+
+    result = service.run_once()
+
+    _, uris = sup.calls[0]
+    assert uris["onvif-a"] == "rtsp://admin:clave@10.0.0.5:554/sub"
+    assert result.found == 0        # no se descubrió nada
+    assert result.started == ["onvif-a"]  # y aun así hay worker
+
+
+def test_discovered_uri_wins_over_remembered(tmp_path):
+    path = _config_file(tmp_path)
+    cfg = _cfg(cameras=[Camera(
+        id="onvif-a", name="salon", last_ip="10.0.0.9",
+        rtsp_main="rtsp://10.0.0.9:554/vieja", rtsp_sub="rtsp://10.0.0.9:554/vieja-sub",
+    )])
+    sup = _FakeSupervisor()
+    service = RescanService(cfg, path, sup, lambda creds: [_disc("onvif-a", "10.0.0.5")])
+
+    service.run_once()
+
+    _, uris = sup.calls[0]
+    assert uris["onvif-a"] == "rtsp://admin:clave@10.0.0.5:554/Streaming/Channels/2"
+
+
+def test_camera_without_any_uri_is_not_in_the_map(tmp_path):
+    path = _config_file(tmp_path)
+    cfg = _cfg(cameras=[Camera(id="onvif-a", name="salon", last_ip="10.0.0.5")])
+    sup = _FakeSupervisor()
+    service = RescanService(cfg, path, sup, lambda creds: [])
+
+    service.run_once()
+
+    _, uris = sup.calls[0]
+    assert uris == {}
+
+
+def test_remembered_main_stream_is_used_when_configured(tmp_path):
+    path = _config_file(tmp_path)
+    cfg = _cfg(cameras=[Camera(
+        id="onvif-a", name="salon", last_ip="10.0.0.5",
+        rtsp_main="rtsp://10.0.0.5:554/main", rtsp_sub="rtsp://10.0.0.5:554/sub",
+    )])
+    cfg.inference.stream = "main"
+    sup = _FakeSupervisor()
+    service = RescanService(cfg, path, sup, lambda creds: [])
+
+    service.run_once()
+
+    _, uris = sup.calls[0]
+    assert uris["onvif-a"].endswith("/main")

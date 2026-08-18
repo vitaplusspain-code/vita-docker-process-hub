@@ -169,6 +169,23 @@ def test_config_reads_uri_fields(tmp_path):
     assert cfg.cameras[0].rtsp_sub == "rtsp://10.0.0.5:554/V_ENC_001"
 
 
+def test_config_handles_null_uri_fields(tmp_path):
+    """Null URIs en config se convierten a cadena vacía, no a 'None'."""
+    path = tmp_path / "hub.yaml"
+    path.write_text(
+        "hub_id: hub-x\n"
+        "cameras:\n"
+        "- id: onvif-a\n"
+        "  name: camera-1\n"
+        "  last_ip: 10.0.0.5\n"
+        "  rtsp_main: null\n"
+        "  rtsp_sub:\n"
+    )
+    cfg = load_config(path, {"VITAHUB_ONVIF_USER": "u", "VITAHUB_ONVIF_PASSWORD": "p"})
+    assert cfg.cameras[0].rtsp_main == ""
+    assert cfg.cameras[0].rtsp_sub == ""
+
+
 def test_save_cameras_persists_uri_fields(tmp_path):
     from vitahub.models import Camera
 
