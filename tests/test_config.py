@@ -169,6 +169,30 @@ def test_config_reads_uri_fields(tmp_path):
     assert cfg.cameras[0].rtsp_sub == "rtsp://10.0.0.5:554/V_ENC_001"
 
 
+def test_load_config_strips_credentials_from_hand_edited_uris(tmp_path):
+    """Un hub.yaml editado a mano con credenciales en la URI debe quedar limpio.
+
+    La invariante "el YAML no contiene secretos" se aplicaba solo a lo que
+    venía de ONVIF (`registry.strip_credentials`). Un operador puede pegar
+    `rtsp://admin:clave@...` a mano (el propio proyecto lo documenta e
+    invita a hacerlo) y `load_config` debe limpiarlo, para que la siguiente
+    reescritura (`save_cameras`) no cemente la contraseña en disco.
+    """
+    path = tmp_path / "hub.yaml"
+    path.write_text(
+        "hub_id: hub-x\n"
+        "cameras:\n"
+        "- id: onvif-a\n"
+        "  name: camera-1\n"
+        "  last_ip: 10.0.0.5\n"
+        "  rtsp_main: rtsp://admin:secreto@10.0.0.5:554/main\n"
+        "  rtsp_sub: rtsp://admin:secreto@10.0.0.5:554/sub\n"
+    )
+    cfg = load_config(path, {"VITAHUB_ONVIF_USER": "u", "VITAHUB_ONVIF_PASSWORD": "p"})
+    assert cfg.cameras[0].rtsp_main == "rtsp://10.0.0.5:554/main"
+    assert cfg.cameras[0].rtsp_sub == "rtsp://10.0.0.5:554/sub"
+
+
 def test_config_handles_null_uri_fields(tmp_path):
     """Null URIs en config se convierten a cadena vacía, no a 'None'."""
     path = tmp_path / "hub.yaml"
@@ -209,13 +233,17 @@ def test_save_cameras_persists_uri_fields(tmp_path):
 
 
 def test_saved_yaml_never_contains_credentials(tmp_path):
-    """Invariante del proyecto: el fichero de config no guarda secretos."""
-    from vitahub.ingest.rtsp import strip_credentials
+    """Invariante del proyecto: el fichero de config no guarda secretos.
+
+    `save_cameras` es la última línea de defensa: se le pasa una `Camera`
+    con credenciales SIN limpiar (a diferencia de antes, que limpiaba la URI
+    antes de llamar y por tanto solo probaba `strip_credentials`, no la
+    defensa de `save_cameras`), y lo escrito en disco no debe contenerlas.
+    """
     from vitahub.models import Camera
 
     path = tmp_path / "hub.yaml"
     path.write_text("hub_id: hub-x\ncameras: []\n")
-    sucia = "rtsp://admin:secreto@10.0.0.5:554/V_ENC_000"
     save_cameras(
         path,
         [
@@ -223,7 +251,7 @@ def test_saved_yaml_never_contains_credentials(tmp_path):
                 id="onvif-a",
                 name="camera-1",
                 last_ip="10.0.0.5",
-                rtsp_main=strip_credentials(sucia),
+                rtsp_main="rtsp://admin:secreto@10.0.0.5:554/V_ENC_000",
                 rtsp_sub="",
             )
         ],

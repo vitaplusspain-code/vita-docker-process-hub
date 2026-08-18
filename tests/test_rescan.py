@@ -278,4 +278,4 @@ def test_remembered_main_stream_is_used_when_configured(tmp_path):
     service.run_once()
 
     _, uris = sup.calls[0]
-    assert uris["onvif-a"].endswith("/main")
+    assert uris["onvif-a"] == "rtsp://admin:clave@10.0.0.5:554/main"

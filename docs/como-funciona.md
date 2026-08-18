@@ -131,9 +131,11 @@ Por cada cámara habilitada con URI resuelta se lanza un hilo *daemon* que:
 
 Además de los eventos de presencia, el hub emite **eventos de conexión**:
 
-- `camera_unreachable` (severidad `medium`) — la cámara lleva 5 minutos sin conseguir abrir el
-  stream. El payload trae `last_ip` y `minutes_down`. Se emite **una vez** por episodio.
-- `camera_reachable` (severidad `info`) — vuelve a conectar, y solo si antes se avisó de la caída.
+- `camera_unreachable` (severidad `medium`) — la cámara lleva 5 minutos sin entregar un fotograma
+  válido (abrir el socket no cuenta: solo el fotograma es evidencia de que hay vídeo de verdad). El
+  payload trae `last_ip` y `minutes_down`. Se emite **una vez** por episodio de desconexión.
+- `camera_reachable` (severidad `info`) — vuelve a llegar vídeo, y solo si antes se avisó de la
+  desconexión.
 
 El umbral es holgado a propósito: un tirón de cable tarda ~30 s solo en que el watchdog de FFmpeg lo
 detecte, más el backoff. Por debajo de eso saldrían avisos falsos cada vez que alguien desenchufa

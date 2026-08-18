@@ -8,3 +8,6 @@ venv/
 .mypy_cache/
 /data/
 *.pt
+# hub.yaml en la raíz (uso local, §3.2 de como-probar.md): con este slice
+# guarda también las rutas RTSP de la vivienda.
+/hub.yaml

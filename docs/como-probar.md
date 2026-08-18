@@ -19,7 +19,7 @@ pip install -e ".[dev]"
 pytest -v
 ```
 
-Deberías ver **139 tests en verde**. Además, las mismas puertas que corren en CI:
+Deberías ver **142 tests en verde**. Además, las mismas puertas que corren en CI:
 
 ```bash
 ruff check src tests
@@ -200,6 +200,14 @@ Respuesta esperada:
 
 ### 3.5 Declarar una cámara a mano
 
+> **Para el hub antes de editar.** `RescanService` trabaja sobre la lista de cámaras que tiene en
+> memoria, y `save_cameras` **sustituye entera** la sección `cameras` del YAML. Si editas
+> `hub.yaml` a mano con el hub en marcha, tu cámara añadida desaparece sin ningún evento en el
+> siguiente rescan que produzca un cambio — nunca llegó a tener worker, así que ni el
+> `ConnectionMonitor` se entera. Procedimiento seguro: **para el hub, edita el fichero, arráncalo
+> de nuevo** (`docker compose stop` / `Ctrl-C`, editar, `docker compose up` / `python -m
+> vitahub.app`).
+
 Sirve para cámaras sin ONVIF, para firmware que lo desactiva al reiniciar, y para entornos donde el
 multicast no llega (Docker sobre macOS, WiFi que aísla clientes). La entrada va **dentro de la lista
 `cameras:` que `hub.yaml` ya tiene** — no crees una segunda clave `cameras:` al final del fichero.
@@ -262,7 +270,7 @@ y para cámaras que nunca vayan a hablar ONVIF.
 
 ## Verificación previa a integrar (checklist)
 
-- [ ] `pytest -v` → 139 verdes.
+- [ ] `pytest -v` → 142 verdes.
 - [ ] `ruff check src tests` y `mypy` limpios.
 - [ ] Arranque en seco (`stub`): descubre o avisa de 0 cámaras, sin caerse.
 - [ ] Extremo a extremo con cámara real: `person_detected` al entrar y `person_absent` al salir.

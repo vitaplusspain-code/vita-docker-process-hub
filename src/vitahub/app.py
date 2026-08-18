@@ -176,7 +176,6 @@ def _camera_loop(camera, rtsp_url, detector, engine, sink, cfg, stop, monitor): 
                 stop.wait(delay)
                 continue
             _log.info("cam %s conectada", camera.id)
-            _emit_all(sink, monitor.on_connected(camera, time.monotonic()))
             attempt = 0
             last_sample = 0.0
             last_frame = time.monotonic()
@@ -190,6 +189,11 @@ def _camera_loop(camera, rtsp_url, detector, engine, sink, cfg, stop, monitor): 
                     stop.wait(0.1)
                     continue
                 last_frame = now
+                # La evidencia de que la cámara funciona es el fotograma, no
+                # el `open` de arriba: abrir el socket sin llegar a entregar
+                # vídeo (slot agotado, RTP filtrado) no debe contar como
+                # "conectada" para el monitor.
+                _emit_all(sink, monitor.on_frame(camera, now))
                 if should_sample(last_sample, now, cfg.inference.sample_fps):
                     last_sample = now
                     try:

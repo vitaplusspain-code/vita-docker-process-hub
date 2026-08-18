@@ -119,6 +119,65 @@ Salidos de las revisiones por tarea y de la revisión final; ninguno bloquea la 
   qué no" de `como-probar.md` no menciona la cobertura nueva pese a haberse actualizado el recuento;
   `como-funciona.md` describe el alcance como el del primer slice.
 
+### Diferidos de la oleada de fixes final (2026-08-18)
+
+Salidos de la revisión final del slice de URI RTSP persistida
+(`docs/superpowers/plans/2026-08-18-url-rtsp-persistida.md`). Ninguno bloquea la integración de esa
+oleada; se corrigieron los críticos/importantes (ver el commit de la oleada), estos quedan para
+después.
+
+- **Un `GetStreamUri` puntual fallido degrada `rtsp_sub` a `rtsp_main` de forma permanente.** Si el
+  descubrimiento no consigue resolver el substream en un ciclo concreto (fallo transitorio de la
+  cámara/red) y `DiscoveredCamera.rtsp_sub` acaba devolviendo el mismo valor que `rtsp_main`,
+  `reconcile()` lo persiste tal cual: la `rtsp_sub` recordada queda sustituida por la del stream
+  principal para siempre, no solo para ese ciclo. Antes de este slice (sin registro persistido) la
+  degradación duraba un ciclo de descubrimiento y se curaba sola en el siguiente; ahora se escribe en
+  el YAML y el Jetson dobla decodificación e inferencia en silencio hasta que alguien lo note.
+  Arreglo probable: no persistir un `uri_changed` si el nuevo valor de `rtsp_sub` coincide con
+  `rtsp_main` mientras el anterior no coincidía (indicio de degradación, no de cambio real).
+- **URIs ONVIF de un solo uso (`InvalidAfterConnect` / `InvalidAfterReboot`) no se contemplan.** Si
+  una cámara emite una de estas (el spec ONVIF las define, aunque la cámara piloto no las usa), cada
+  `GetStreamUri` devolvería una URI distinta aunque nada real haya cambiado: `reconcile()` vería
+  `uri_changed` en cada rescan periódico (cada `discovery.interval_seconds`, hoy 60 s por defecto),
+  con su escritura en la eMMC y su parada/arranque de worker asociados, indefinidamente. Antes de
+  actuar, comprobar si el flag `InvalidAfterConnect`/`InvalidAfterReboot` viene en la respuesta SOAP
+  y, si es así, no tratar esa URI como candidata a persistir (usarla solo en memoria para esa
+  conexión).
+- **Una cámara conocida sin URI recordada nunca emite `camera_unreachable`.** Si el registro trae una
+  cámara de la versión anterior a este slice (sin `rtsp_main`/`rtsp_sub`, aún no redescubierta) y el
+  descubrimiento tampoco la encuentra, `RescanService` no le arranca worker — y sin worker, el
+  `ConnectionMonitor` nunca ve ni un `on_frame` ni un `on_failed` para esa cámara. Es el único caso
+  que sigue abierto del principio "que una cámara perdida no pase desapercibida": la vivienda queda a
+  ciegas de esa cámara y no sale ningún evento que lo señale. Se resuelve solo cuando esa cámara
+  vuelva a ser descubierta por ONVIF.
+- **El warning de "0 cámaras encontradas" ahora es el arranque normal esperado, no una señal de
+  fallo.** Con firmware que desactiva ONVIF al reiniciar (la cámara piloto, ver punto 5 más arriba),
+  tras cada corte de luz el hub arranca, `discover()` devuelve 0, y sin embargo los workers sí
+  arrancan (con la URI recordada). El log actual (`descubrimiento: 0 cámaras encontradas — revisa
+  ONVIF/credencial/red`) sugiere una avería que no existe y mandaría a un técnico a perseguir un
+  fantasma. Añadir al mensaje cuántos workers arrancaron igualmente (p. ej. "0 cámaras descubiertas,
+  N workers arrancados con URI recordada") distingue el caso sano del caso realmente roto (0
+  descubiertas y 0 arrancadas).
+- **`RescanResult` y la respuesta de `POST /rescan` no exponen `uri_changed`.** El registro
+  (`registry.RegistryChange`) ya distingue `"added"` / `"ip_changed"` / `"uri_changed"` — este último
+  es justo el cambio que introduce este slice (URI recordada actualizada) — pero `RescanResult` solo
+  agrega `added` e `ip_changed`; un operador mirando la respuesta de `POST /rescan` no puede ver que
+  una URI cambió. Añadir `uri_changed: list[str]` en paralelo a `ip_changed`.
+- **El estado del `ConnectionMonitor` vive solo en memoria.** Si el hub reinicia entre un
+  `camera_unreachable` ya emitido y la reconexión, el `camera_reachable` de cierre de ese episodio no
+  sale nunca (el proceso nuevo arranca con `_states` vacío, así que la próxima conexión no cuenta como
+  "recuperación" de nada). Hoy es inocuo: son eventos por stdout que nadie más consulta. Pasa a
+  importar en cuanto exista el uplink a AWS (punto 3 de arriba) y algo consuma esos eventos para
+  decidir si mandar a alguien a la vivienda — un episodio que nunca se cierra formalmente podría
+  confundir a ese consumidor.
+- **Una cámara declarada a mano que luego aparece por ONVIF entra como cámara distinta.** Ya
+  documentado en `como-probar.md` §3.5 (se pierde la identidad estable al elegir un `id` a mano), pero
+  vale la pena registrar el efecto en código: dos entradas en el registro para la misma cámara física
+  (`camara-salon` a mano + `onvif-<serie>` cuando ONVIF vuelve a verla) significan **dos workers**
+  sobre el mismo RTSP, eventos de presencia duplicados y doble decodificación/inferencia en el Jetson
+  sin que nada lo señale. Mitigación manual hoy: borrar la entrada a mano del YAML en cuanto aparezca
+  la descubierta. Arreglo de código pendiente de diseñar (¿deduplicar por URI RTSP normalizada?).
+
 ## Verificación pendiente en hardware real
 Las partes de red (descubrimiento ONVIF, captura RTSP) no corren en CI por diseño. Validar
 extremo-a-extremo contra una cámara real: `docker compose up` con la credencial del hogar y

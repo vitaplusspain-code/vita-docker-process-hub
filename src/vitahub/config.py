@@ -8,6 +8,7 @@ from pathlib import Path
 
 import yaml
 
+from vitahub.ingest.rtsp import strip_credentials
 from vitahub.models import Camera
 
 
@@ -57,14 +58,19 @@ def _cameras_from_raw(raw: list[dict[str, object]]) -> list[Camera]:
     cameras: list[Camera] = []
     for entry in raw:
         try:
+            # `strip_credentials` también aquí, no solo en `registry.py`: un
+            # hub.yaml editado a mano (el propio proyecto lo documenta e
+            # invita a hacerlo) puede traer `usuario:clave@` en la URI, y sin
+            # limpiar al leer, la siguiente `save_cameras` cementaría la
+            # contraseña en disco indefinidamente.
             cameras.append(
                 Camera(
                     id=str(entry["id"]),
                     name=str(entry["name"]),
                     last_ip=str(entry["last_ip"]),
                     enabled=bool(entry.get("enabled", True)),
-                    rtsp_main=str(entry.get("rtsp_main") or ""),
-                    rtsp_sub=str(entry.get("rtsp_sub") or ""),
+                    rtsp_main=strip_credentials(str(entry.get("rtsp_main") or "")),
+                    rtsp_sub=strip_credentials(str(entry.get("rtsp_sub") or "")),
                 )
             )
         except KeyError as exc:
@@ -157,8 +163,11 @@ def save_cameras(path: Path, cameras: list[Camera]) -> None:
             "id": c.id,
             "name": c.name,
             "last_ip": c.last_ip,
-            "rtsp_main": c.rtsp_main,
-            "rtsp_sub": c.rtsp_sub,
+            # Última línea de defensa de la invariante "el YAML no contiene
+            # secretos": aunque llegara una Camera con credenciales sin
+            # limpiar, aquí no se escriben.
+            "rtsp_main": strip_credentials(c.rtsp_main),
+            "rtsp_sub": strip_credentials(c.rtsp_sub),
             "enabled": c.enabled,
         }
         for c in cameras

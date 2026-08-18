@@ -34,9 +34,20 @@ class ConnectionMonitor:
         self._hub_id = hub_id
         self._unreachable_after_s = unreachable_after_s
         self._clock = clock
+        # Compartido entre los hilos de cámara (uno por `camera.id`), sin lock:
+        # cada hilo solo lee/escribe la entrada de SU PROPIA cámara (su propia
+        # clave), nunca la de otro hilo, así que no hay carrera posible entre
+        # hilos sobre la misma entrada.
         self._states: dict[str, _ConnState] = {}
 
-    def on_connected(self, camera: Camera, now: float) -> list[Event]:
+    def on_frame(self, camera: Camera, now: float) -> list[Event]:
+        """Registra la evidencia de que la cámara funciona: un fotograma válido.
+
+        Deliberadamente NO se llama al abrir el socket (`open_capture`): una
+        cámara puede abrir la conexión sin llegar a entregar vídeo (slot de
+        stream agotado, RTP filtrado, firmware colgado), y ahí el `open` por
+        sí solo no demuestra nada.
+        """
         state = self._states.setdefault(camera.id, _ConnState(last_ok=now))
         was_down = state.reported_down
         state.last_ok = now
