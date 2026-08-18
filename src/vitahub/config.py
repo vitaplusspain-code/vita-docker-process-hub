@@ -63,6 +63,8 @@ def _cameras_from_raw(raw: list[dict[str, object]]) -> list[Camera]:
                     name=str(entry["name"]),
                     last_ip=str(entry["last_ip"]),
                     enabled=bool(entry.get("enabled", True)),
+                    rtsp_main=str(entry.get("rtsp_main", "")),
+                    rtsp_sub=str(entry.get("rtsp_sub", "")),
                 )
             )
         except KeyError as exc:
@@ -151,7 +153,14 @@ def save_cameras(path: Path, cameras: list[Camera]) -> None:
             "config inválida"
         )
     raw["cameras"] = [
-        {"id": c.id, "name": c.name, "last_ip": c.last_ip, "enabled": c.enabled}
+        {
+            "id": c.id,
+            "name": c.name,
+            "last_ip": c.last_ip,
+            "rtsp_main": c.rtsp_main,
+            "rtsp_sub": c.rtsp_sub,
+            "enabled": c.enabled,
+        }
         for c in cameras
     ]
     fd, tmp = tempfile.mkstemp(

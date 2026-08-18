@@ -50,3 +50,9 @@ def test_event_is_frozen():
     assert ev.type == "person_detected"
     with pytest.raises(dataclasses.FrozenInstanceError):
         ev.type = "x"
+
+
+def test_camera_uris_default_to_empty():
+    cam = Camera(id="a", name="camera-1", last_ip="10.0.0.5")
+    assert cam.rtsp_main == ""
+    assert cam.rtsp_sub == ""

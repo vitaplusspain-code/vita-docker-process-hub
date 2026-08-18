@@ -17,6 +17,11 @@ class Camera:
     name: str
     last_ip: str
     enabled: bool = True
+    # URIs que ONVIF resolvió en su día, sin credenciales. Permiten reconectar
+    # cuando el descubrimiento no encuentra la cámara (firmware que apaga ONVIF
+    # al reiniciar, multicast que no llega). Vacías = aún no descubierta.
+    rtsp_main: str = ""
+    rtsp_sub: str = ""
 
 
 @dataclass(frozen=True)

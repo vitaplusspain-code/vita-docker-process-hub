@@ -136,3 +136,79 @@ def test_valid_stream_values_are_accepted(tmp_path):
     path.write_text("hub_id: hub-x\ninference:\n  stream: main\n")
     cfg = load_config(path, ENV)
     assert cfg.inference.stream == "main"
+
+
+def test_config_without_uri_fields_still_loads(tmp_path):
+    """Retrocompatibilidad: un hub.yaml de la versión anterior debe cargar."""
+    path = tmp_path / "hub.yaml"
+    path.write_text(
+        "hub_id: hub-x\n"
+        "cameras:\n"
+        "- id: onvif-a\n"
+        "  name: camera-1\n"
+        "  last_ip: 10.0.0.5\n"
+    )
+    cfg = load_config(path, {"VITAHUB_ONVIF_USER": "u", "VITAHUB_ONVIF_PASSWORD": "p"})
+    assert cfg.cameras[0].rtsp_main == ""
+    assert cfg.cameras[0].rtsp_sub == ""
+
+
+def test_config_reads_uri_fields(tmp_path):
+    path = tmp_path / "hub.yaml"
+    path.write_text(
+        "hub_id: hub-x\n"
+        "cameras:\n"
+        "- id: onvif-a\n"
+        "  name: camera-1\n"
+        "  last_ip: 10.0.0.5\n"
+        "  rtsp_main: rtsp://10.0.0.5:554/V_ENC_000\n"
+        "  rtsp_sub: rtsp://10.0.0.5:554/V_ENC_001\n"
+    )
+    cfg = load_config(path, {"VITAHUB_ONVIF_USER": "u", "VITAHUB_ONVIF_PASSWORD": "p"})
+    assert cfg.cameras[0].rtsp_main == "rtsp://10.0.0.5:554/V_ENC_000"
+    assert cfg.cameras[0].rtsp_sub == "rtsp://10.0.0.5:554/V_ENC_001"
+
+
+def test_save_cameras_persists_uri_fields(tmp_path):
+    from vitahub.models import Camera
+
+    path = tmp_path / "hub.yaml"
+    path.write_text("hub_id: hub-x\ncameras: []\n")
+    save_cameras(
+        path,
+        [
+            Camera(
+                id="onvif-a",
+                name="camera-1",
+                last_ip="10.0.0.5",
+                rtsp_main="rtsp://10.0.0.5:554/V_ENC_000",
+                rtsp_sub="rtsp://10.0.0.5:554/V_ENC_001",
+            )
+        ],
+    )
+    reloaded = load_config(path, {"VITAHUB_ONVIF_USER": "u", "VITAHUB_ONVIF_PASSWORD": "p"})
+    assert reloaded.cameras[0].rtsp_main == "rtsp://10.0.0.5:554/V_ENC_000"
+    assert reloaded.cameras[0].rtsp_sub == "rtsp://10.0.0.5:554/V_ENC_001"
+
+
+def test_saved_yaml_never_contains_credentials(tmp_path):
+    """Invariante del proyecto: el fichero de config no guarda secretos."""
+    from vitahub.ingest.rtsp import strip_credentials
+    from vitahub.models import Camera
+
+    path = tmp_path / "hub.yaml"
+    path.write_text("hub_id: hub-x\ncameras: []\n")
+    sucia = "rtsp://admin:secreto@10.0.0.5:554/V_ENC_000"
+    save_cameras(
+        path,
+        [
+            Camera(
+                id="onvif-a",
+                name="camera-1",
+                last_ip="10.0.0.5",
+                rtsp_main=strip_credentials(sucia),
+                rtsp_sub="",
+            )
+        ],
+    )
+    assert "secreto" not in path.read_text()

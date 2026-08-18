@@ -39,6 +39,20 @@ def with_credentials(rtsp_url: str, user: str, password: str) -> str:
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
+def strip_credentials(rtsp_url: str) -> str:
+    """Quita el userinfo (usuario:clave@) de una URL RTSP. Inverso de with_credentials.
+
+    El fichero de config no contiene secretos: las credenciales se inyectan en
+    memoria al conectar. Si una URI llegara de ONVIF con userinfo y se
+    persistiera tal cual, la contraseña del hogar acabaría escrita en el YAML.
+    """
+    parts = urlsplit(rtsp_url)
+    if "@" not in parts.netloc:
+        return rtsp_url
+    host = parts.netloc.rsplit("@", 1)[1]
+    return urlunsplit((parts.scheme, host, parts.path, parts.query, parts.fragment))
+
+
 def open_capture(rtsp_url: str):  # type: ignore[no-untyped-def]
     """Runtime only. No cubierto por unit tests (requiere stream real)."""
     import cv2

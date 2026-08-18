@@ -1,4 +1,10 @@
-from vitahub.ingest.rtsp import backoff_delay, is_stalled, should_sample, with_credentials
+from vitahub.ingest.rtsp import (
+    backoff_delay,
+    is_stalled,
+    should_sample,
+    strip_credentials,
+    with_credentials,
+)
 
 
 def test_backoff_is_capped_exponential():
@@ -34,3 +40,25 @@ def test_with_credentials_leaves_existing_userinfo_unchanged():
 def test_with_credentials_empty_user_unchanged():
     url = "rtsp://10.0.0.5:554/Streaming/Channels/1"
     assert with_credentials(url, "", "p@ss") == url
+
+
+def test_strip_credentials_removes_userinfo():
+    url = "rtsp://admin:cl%40ve@10.0.0.5:554/V_ENC_000"
+    assert strip_credentials(url) == "rtsp://10.0.0.5:554/V_ENC_000"
+
+
+def test_strip_credentials_leaves_clean_url_untouched():
+    url = "rtsp://10.0.0.5:554/V_ENC_000"
+    assert strip_credentials(url) == url
+
+
+def test_strip_credentials_keeps_query_and_port():
+    url = "rtsp://user:pass@10.0.0.5:8554/cam?channel=1"
+    assert strip_credentials(url) == "rtsp://10.0.0.5:8554/cam?channel=1"
+
+
+def test_strip_then_with_credentials_roundtrip():
+    original = "rtsp://admin:secreto@10.0.0.5:554/V_ENC_000"
+    limpia = strip_credentials(original)
+    assert "secreto" not in limpia
+    assert with_credentials(limpia, "admin", "secreto") == original
