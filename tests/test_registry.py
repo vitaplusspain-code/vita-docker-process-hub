@@ -19,6 +19,9 @@ def test_new_camera_is_added():
 
 
 def test_known_camera_ip_change_is_updated():
+    # Estado deliberadamente inconsistente: URIs ya con la IP nueva mientras last_ip
+    # sigue siendo la vieja. Esto aísla el assert de "solo ip_changed", evitando que
+    # uri_changed dispare. En producción este estado no ocurre (ver test_ip_and_uri_change_together_dhcp_scenario).
     existing = [Camera(
         id="onvif-a", name="salon", last_ip="10.0.0.5",
         rtsp_main="rtsp://10.0.0.9:554/Streaming/Channels/1",
@@ -96,3 +99,24 @@ def test_unseen_camera_keeps_its_uris():
     merged, changes = reconcile(existing, [])
     assert merged[0].rtsp_main == "rtsp://10.0.0.5:554/main"
     assert changes == []
+
+
+def test_ip_and_uri_change_together_dhcp_scenario():
+    """Escenario real de producción: DHCP reasigna IP y ONVIF devuelve URIs nuevas.
+    Ambos cambios ocurren en el mismo reconcile y deben reportarse y aplicarse."""
+    existing = [Camera(
+        id="onvif-a", name="salon", last_ip="10.0.0.5",
+        rtsp_main="rtsp://10.0.0.5:554/Streaming/Channels/1",
+        rtsp_sub="rtsp://10.0.0.5:554/Streaming/Channels/2",
+    )]
+    # Descubrimiento devuelve IP nueva y URIs que llevan esa IP nueva
+    merged, changes = reconcile(existing, [_disc("onvif-a", "10.0.0.9")])
+    # Verificar que ambos cambios se reportan
+    change_kinds = [ch.kind for ch in changes]
+    assert "ip_changed" in change_kinds
+    assert "uri_changed" in change_kinds
+    # Verificar que tanto last_ip como las URIs se actualizan
+    assert merged[0].last_ip == "10.0.0.9"
+    assert merged[0].rtsp_main == "rtsp://10.0.0.9:554/Streaming/Channels/1"
+    assert merged[0].rtsp_sub == "rtsp://10.0.0.9:554/Streaming/Channels/2"
+    assert merged[0].name == "salon"  # nombre se preserva
