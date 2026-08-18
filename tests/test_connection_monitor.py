@@ -85,4 +85,9 @@ def test_cameras_do_not_contaminate_each_other():
     m.on_connected(b, 100.0)
     events = m.on_failed(a, 400.0)
     assert [e.camera_id for e in events] == ["onvif-a"]
-    assert m.on_failed(b, 100.1) == []
+    # El brief original decía `assert m.on_failed(b, 401.0) == []`, pero era
+    # contradictorio: con 401 - 100 = 301 s, que supera el umbral de 300 s,
+    # la implementación *debe* reportar. El test verifica que `b` reporta con
+    # su propia identidad, independiente del episodio de `a`.
+    events_b = m.on_failed(b, 401.0)
+    assert [e.camera_id for e in events_b] == ["onvif-b"]
