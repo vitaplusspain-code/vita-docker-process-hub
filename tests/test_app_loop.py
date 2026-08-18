@@ -60,3 +60,20 @@ def test_start_control_server_safe_logs_warning_without_leaking_token(caplog):
     assert "no disponible" in message
     assert "8787" in message
     assert secret_token not in message
+
+
+def test_emit_all_survives_a_failing_sink():
+    """Un fallo al emitir no puede tumbar el hilo de la cámara."""
+    from vitahub.app import _emit_all
+
+    class _BoomSink:
+        def __init__(self):
+            self.seen = []
+
+        def emit(self, event):
+            self.seen.append(event)
+            raise OSError("stdout roto")
+
+    sink = _BoomSink()
+    _emit_all(sink, ["evento-1", "evento-2"])
+    assert len(sink.seen) == 2  # siguió con el segundo pese al fallo del primero

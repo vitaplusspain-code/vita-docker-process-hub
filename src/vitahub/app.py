@@ -8,6 +8,7 @@ import time
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
+from vitahub.analytics.connection_monitor import ConnectionMonitor
 from vitahub.analytics.event_engine import EventEngine
 from vitahub.config import ConfigError, load_config
 from vitahub.control import admin_port, start_control_server
@@ -20,8 +21,9 @@ from vitahub.ingest.rtsp import (
     should_sample,
 )
 from vitahub.logging_setup import configure_logging, get_logger, register_secret
-from vitahub.models import Camera
+from vitahub.models import Camera, Event
 from vitahub.rescan import RescanService
+from vitahub.sinks.base import EventSink
 from vitahub.sinks.stdout_json import StdoutJsonSink
 from vitahub.supervisor import CameraSupervisor
 from vitahub.worker import process_frame
@@ -60,11 +62,12 @@ def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
 
     detector = build_detector(cfg.inference, weights_path)
     engine = EventEngine(cfg.hub_id)
+    monitor = ConnectionMonitor(cfg.hub_id)
     sink = StdoutJsonSink()
 
     def worker(camera: Camera, rtsp_url: str, cam_stop: threading.Event) -> None:
         _camera_loop(  # type: ignore[no-untyped-call]
-            camera, rtsp_url, detector, engine, sink, cfg, cam_stop
+            camera, rtsp_url, detector, engine, sink, cfg, cam_stop, monitor
         )
 
     supervisor = CameraSupervisor(worker)
@@ -150,7 +153,16 @@ def _rescan_loop(service: RescanService, interval_seconds: float, stop: threadin
         service.run_once()
 
 
-def _camera_loop(camera, rtsp_url, detector, engine, sink, cfg, stop):  # type: ignore[no-untyped-def]
+def _emit_all(sink: EventSink, events: list[Event]) -> None:
+    """Vuelca eventos por el sink. Un fallo de emisión no tumba el worker."""
+    for event in events:
+        try:
+            sink.emit(event)
+        except Exception:  # noqa: BLE001 — emitir no debe matar el hilo de cámara
+            _log.exception("no se pudo emitir un evento")
+
+
+def _camera_loop(camera, rtsp_url, detector, engine, sink, cfg, stop, monitor):  # type: ignore[no-untyped-def]
     attempt = 0
     while not stop.is_set():
         cap = None
@@ -159,10 +171,12 @@ def _camera_loop(camera, rtsp_url, detector, engine, sink, cfg, stop):  # type: 
             if not cap.isOpened():
                 delay = backoff_delay(attempt)
                 _log.warning("cam %s no abre, reintento en %.0fs", camera.id, delay)
+                _emit_all(sink, monitor.on_failed(camera, time.monotonic()))
                 attempt += 1
                 stop.wait(delay)
                 continue
             _log.info("cam %s conectada", camera.id)
+            _emit_all(sink, monitor.on_connected(camera, time.monotonic()))
             attempt = 0
             last_sample = 0.0
             last_frame = time.monotonic()
@@ -185,6 +199,7 @@ def _camera_loop(camera, rtsp_url, detector, engine, sink, cfg, stop):  # type: 
             _log.info("cam %s desconectada", camera.id)
         except Exception:  # noqa: BLE001 — un fallo de conexión no tumba el worker
             _log.exception("cam %s error de conexión, reconecto", camera.id)
+            _emit_all(sink, monitor.on_failed(camera, time.monotonic()))
             delay = backoff_delay(attempt)
             attempt += 1
             stop.wait(delay)
