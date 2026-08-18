@@ -815,7 +815,7 @@ from vitahub.analytics.connection_monitor import ConnectionMonitor
 Añadir el helper a nivel de módulo:
 
 ```python
-def _emit_all(sink, events) -> None:  # type: ignore[no-untyped-def]
+def _emit_all(sink: EventSink, events: list[Event]) -> None:
     """Vuelca eventos por el sink. Un fallo de emisión no tumba el worker."""
     for event in events:
         try:
@@ -823,6 +823,10 @@ def _emit_all(sink, events) -> None:  # type: ignore[no-untyped-def]
         except Exception:  # noqa: BLE001 — emitir no debe matar el hilo de cámara
             _log.exception("no se pudo emitir un evento")
 ```
+
+Requiere importar `EventSink` de `vitahub.sinks.base` y `Event` de `vitahub.models` en
+`app.py`. Va tipado por completo: mypy solo comprueba `src/`, así que el doble del test
+(que no es un `EventSink`) sigue valiendo por duck typing.
 
 En `run()`, construir el monitor junto al motor de eventos y pasárselo al worker:
 
