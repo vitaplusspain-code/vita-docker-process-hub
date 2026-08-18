@@ -97,7 +97,11 @@ def test_main_stream_is_used_when_configured(tmp_path):
 def test_no_changes_does_not_write_to_disk(tmp_path, monkeypatch):
     """Blinda que un rescan cada 60s no escriba el YAML sin motivo."""
     path = _config_file(tmp_path)
-    cfg = _cfg(cameras=[Camera(id="onvif-a", name="salon", last_ip="10.0.0.5")])
+    cfg = _cfg(cameras=[Camera(
+        id="onvif-a", name="salon", last_ip="10.0.0.5",
+        rtsp_main="rtsp://10.0.0.5:554/Streaming/Channels/1",
+        rtsp_sub="rtsp://10.0.0.5:554/Streaming/Channels/2",
+    )])
     saves = []
     monkeypatch.setattr(
         "vitahub.rescan.save_cameras", lambda p, c: saves.append(p)
