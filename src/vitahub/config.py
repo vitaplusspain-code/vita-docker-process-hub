@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -35,6 +35,21 @@ class Credentials:
     onvif_password: str
 
 
+# Rutas por defecto de los tres ficheros que deja scripts/provision-hub.sh
+# (repo vitaplus-aws-architecture) en el Jetson.
+_DEFAULT_CERT_DIR = "/data/certs"
+
+
+@dataclass
+class UplinkConfig:
+    enabled: bool = False
+    topic_prefix: str = "vita/hub"
+    endpoint: str = ""
+    ca_path: str = ""
+    cert_path: str = ""
+    key_path: str = ""
+
+
 @dataclass
 class HubConfig:
     hub_id: str
@@ -42,6 +57,7 @@ class HubConfig:
     inference: InferenceConfig
     cameras: list[Camera]
     credentials: Credentials
+    uplink: UplinkConfig = field(default_factory=UplinkConfig)
 
 
 def _credentials_from_env(env: Mapping[str, str]) -> Credentials:
@@ -80,6 +96,52 @@ def _cameras_from_raw(raw: list[dict[str, object]]) -> list[Camera]:
     return cameras
 
 
+def _uplink_from_raw(raw: Mapping[str, object], env: Mapping[str, str]) -> UplinkConfig:
+    """Lee la sección `uplink` y verifica que la instalación está completa.
+
+    Falla el arranque a propósito cuando `enabled` es true y falta algo: es un
+    error de instalación, y el técnico que sembró el certificado ESTÁ delante.
+    Mismo criterio que `_credentials_from_env` con la credencial ONVIF. Un
+    uplink que arranca en silencio sin poder publicar es un hogar que parece
+    instalado y no reporta nada.
+    """
+    enabled = bool(raw.get("enabled", False))
+    topic_prefix = str(raw.get("topic_prefix", "vita/hub"))
+    if not topic_prefix:
+        raise ConfigError("Campo 'uplink.topic_prefix' no puede estar vacío")
+    if not enabled:
+        return UplinkConfig(enabled=False, topic_prefix=topic_prefix)
+
+    endpoint = env.get("VITAHUB_IOT_ENDPOINT", "")
+    if not endpoint:
+        raise ConfigError(
+            "uplink.enabled es true pero falta la variable de entorno "
+            "VITAHUB_IOT_ENDPOINT (el endpoint ATS de la cuenta; lo imprime "
+            "scripts/provision-hub.sh del repo de arquitectura)"
+        )
+
+    paths = {
+        "ca_path": env.get("VITAHUB_IOT_CA", f"{_DEFAULT_CERT_DIR}/AmazonRootCA1.pem"),
+        "cert_path": env.get("VITAHUB_IOT_CERT", f"{_DEFAULT_CERT_DIR}/certificate.pem.crt"),
+        "key_path": env.get("VITAHUB_IOT_KEY", f"{_DEFAULT_CERT_DIR}/private.pem.key"),
+    }
+    for name, value in paths.items():
+        if not Path(value).is_file():
+            raise ConfigError(
+                f"uplink.enabled es true pero no existe el fichero de certificado "
+                f"{value} ({name}) — siémbralo con scripts/provision-hub.sh"
+            )
+
+    return UplinkConfig(
+        enabled=True,
+        topic_prefix=topic_prefix,
+        endpoint=endpoint,
+        ca_path=paths["ca_path"],
+        cert_path=paths["cert_path"],
+        key_path=paths["key_path"],
+    )
+
+
 def load_config(path: Path, env: Mapping[str, str]) -> HubConfig:
     credentials = _credentials_from_env(env)
     try:
@@ -100,6 +162,10 @@ def load_config(path: Path, env: Mapping[str, str]) -> HubConfig:
     inf_raw = raw.get("inference") or {}
     if not isinstance(inf_raw, dict):
         raise ConfigError("Sección 'inference' debe ser un mapping YAML")
+
+    up_raw = raw.get("uplink") or {}
+    if not isinstance(up_raw, dict):
+        raise ConfigError("Sección 'uplink' debe ser un mapping YAML")
 
     try:
         interval_seconds = int(disc_raw.get("interval_seconds", 60))
@@ -143,6 +209,7 @@ def load_config(path: Path, env: Mapping[str, str]) -> HubConfig:
         ),
         cameras=_cameras_from_raw(raw.get("cameras") or []),
         credentials=credentials,
+        uplink=_uplink_from_raw(up_raw, env),
     )
 
 

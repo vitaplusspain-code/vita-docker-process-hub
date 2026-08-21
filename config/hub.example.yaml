@@ -6,6 +6,13 @@ inference:
   sample_fps: 2
   confidence: 0.4
   stream: substream         # "substream" ahorra CPU; "main" para más resolución
+uplink:
+  enabled: false            # true para publicar los eventos en AWS IoT Core
+  topic_prefix: vita/hub    # NO lo cambies por hogar: la policy de IoT lo lleva fijo,
+                            # y con otro valor el broker descarta los publish en silencio
+# Con enabled: true hacen falta además estas variables de entorno:
+#   VITAHUB_IOT_ENDPOINT  (lo imprime provision-hub.sh del repo de arquitectura)
+#   VITAHUB_IOT_CA / VITAHUB_IOT_CERT / VITAHUB_IOT_KEY  (por defecto en /data/certs/)
 cameras: []                 # se autopobla al descubrir; editable a mano
 # Nota: tras el primer descubrimiento el hub reescribe este fichero (sección cameras);
 # los comentarios pueden perderse. Edita a mano solo con el hub parado.
