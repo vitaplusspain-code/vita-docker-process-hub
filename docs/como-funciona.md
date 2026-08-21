@@ -155,10 +155,17 @@ algo.
 Por MQTT sale byte a byte el mismo JSON que ves en `docker logs`: es `Event.to_json()` en
 los dos casos, un solo esquema que mantener.
 
-Ningún fallo del uplink tumba nada. Un `publish` que lanza se traga en el `AwsIotSink`, y
-si aun así escapara, el `FanoutSink` lo aísla para que `stdout` reciba igual, y por encima
-están el `try` de `_emit_all` y el del bucle de cámara. Un hogar sin internet sigue
-detectando; lo único que pierde son los eventos de ese rato, porque no hay cola.
+Ningún fallo del uplink **en marcha** tumba nada. Un `publish` que lanza se traga en el
+`AwsIotSink`, y si aun así escapara, el `FanoutSink` lo aísla para que `stdout` reciba
+igual, y por encima están el `try` de `_emit_all` y el del bucle de cámara. Un hogar sin
+internet sigue detectando; lo único que pierde son los eventos de ese rato, porque no hay
+cola.
+
+Esto es distinto de un fallo **al construir** el cliente: `build_client` (llamado una vez,
+en el arranque) sí puede fallar rápido y a propósito si un certificado está truncado o es
+ilegible, y `build_sink` lo traduce a un `ConfigError` legible en vez de dejar escapar el
+`ssl.SSLError` crudo — mismo criterio de *fail-fast* que el resto de `load_config` (§4.4
+del spec): es un error de instalación y el técnico está delante.
 
 ### 5. Salud y apagado
 - El bucle principal refresca `/data/heartbeat` cada 5 s; el `HEALTHCHECK` de Docker

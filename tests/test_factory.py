@@ -1,4 +1,9 @@
+import ssl
+
+import pytest
+
 from vitahub.config import (
+    ConfigError,
     Credentials,
     DiscoveryConfig,
     HubConfig,
@@ -66,6 +71,30 @@ def test_build_sink_with_uplink_fans_out_to_stdout_and_aws(monkeypatch):
     assert StdoutJsonSink in kinds
     assert AwsIotSink in kinds
     assert built["hub_id"] == "hub-casa-lopez"
+
+
+def test_build_sink_wraps_a_broken_client_as_config_error(monkeypatch):
+    # load_config solo comprueba que los ficheros existen, no que sean PEM
+    # válidos: un truncado revienta en client.tls_set() con ssl.SSLError.
+    # build_sink debe traducirlo a ConfigError con un mensaje de instalación,
+    # no dejarlo escapar como traceback crudo.
+    def _broken_build_client(hub_id, endpoint, ca, cert, key):
+        raise ssl.SSLError("certificado corrupto")
+
+    monkeypatch.setattr("vitahub.factory.build_client", _broken_build_client)
+    with pytest.raises(ConfigError, match="certificado corrupto"):
+        build_sink(
+            _hub_config(
+                UplinkConfig(
+                    enabled=True,
+                    topic_prefix="vita/hub",
+                    endpoint="abc-ats.iot.eu-west-1.amazonaws.com",
+                    ca_path="/data/certs/AmazonRootCA1.pem",
+                    cert_path="/data/certs/certificate.pem.crt",
+                    key_path="/data/certs/private.pem.key",
+                )
+            )
+        )
 
 
 def test_build_sink_uses_the_contract_topic(monkeypatch):

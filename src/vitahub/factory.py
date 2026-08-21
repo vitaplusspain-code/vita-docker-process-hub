@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from vitahub.config import HubConfig, InferenceConfig
+from vitahub.config import ConfigError, HubConfig, InferenceConfig
 from vitahub.inference.base import Detector
 from vitahub.inference.person_yolo import PersonDetector
 from vitahub.inference.stub import StubDetector
@@ -34,13 +34,29 @@ def build_sink(cfg: HubConfig) -> EventSink:
     if not cfg.uplink.enabled:
         return stdout
 
-    client = build_client(
-        hub_id=cfg.hub_id,
-        endpoint=cfg.uplink.endpoint,
-        ca=Path(cfg.uplink.ca_path),
-        cert=Path(cfg.uplink.cert_path),
-        key=Path(cfg.uplink.key_path),
-    )
+    # `load_config` solo comprueba que los tres ficheros existen
+    # (`Path.is_file()`); no que sean PEM válidos. Un fichero truncado o
+    # ilegible pasa esa validación y revienta aquí, en `client.tls_set()`,
+    # con un `ssl.SSLError` que de otro modo escaparía de `build_sink` → `run`
+    # → el `except Exception` de `main`: "fallo no controlado" + `exit(1)` +
+    # bucle de reinicio, un traceback en vez de un mensaje de instalación. Se
+    # relanza rápido — según el spec §4.4 es lo correcto, el técnico está
+    # delante — pero como `ConfigError`, con la ruta y qué revisar.
+    try:
+        client = build_client(
+            hub_id=cfg.hub_id,
+            endpoint=cfg.uplink.endpoint,
+            ca=Path(cfg.uplink.ca_path),
+            cert=Path(cfg.uplink.cert_path),
+            key=Path(cfg.uplink.key_path),
+        )
+    except Exception as exc:  # se traduce a ConfigError abajo (con la causa encadenada)
+        raise ConfigError(
+            "uplink.enabled es true pero no se pudo construir el cliente MQTT "
+            f"({exc}) — revisa que los certificados en {cfg.uplink.ca_path}, "
+            f"{cfg.uplink.cert_path} y {cfg.uplink.key_path} sean PEM válidos "
+            "y correspondan al mismo hogar dado de alta con scripts/provision-hub.sh"
+        ) from exc
     topic = topic_for(cfg.uplink.topic_prefix, cfg.hub_id)
     _log.info("uplink habilitado hacia %s", topic)
     return FanoutSink([stdout, AwsIotSink(client, topic)])
