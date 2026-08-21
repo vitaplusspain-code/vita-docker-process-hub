@@ -11,3 +11,6 @@ venv/
 # hub.yaml en la raíz (uso local, §3.2 de como-probar.md): con este slice
 # guarda también las rutas RTSP de la vivienda.
 /hub.yaml
+# Variables de entorno del despliegue (credencial ONVIF, endpoint/rutas del
+# uplink AWS IoT): Compose lo carga solo, no debe llegar al repositorio.
+/.env
