@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import itertools
 import ssl
+from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
@@ -50,11 +52,23 @@ class AwsIotSink(EventSink):
             _log.exception("no se pudo publicar en %s", self._topic)
 
     def close(self) -> None:
+        # Orden documentado de paho: disconnect() antes que loop_stop(). Hoy
+        # funciona al revés por accidente de la implementación (loop_stop
+        # deja self._thread a None y entonces _packet_queue escribe el
+        # DISCONNECT de forma síncrona), pero sin un DISCONNECT limpio un
+        # apagado ordenado es indistinguible de un corte de luz hasta que
+        # vence el keepalive — y los eventos de presencia de IoT están
+        # planificados para más adelante. Cada llamada en su propio
+        # try/except, como FanoutSink con cada sink: si una lanza, la otra
+        # tiene que intentarse igual.
         try:
-            self._client.loop_stop()
             self._client.disconnect()
         except Exception:  # noqa: BLE001 — el apagado no falla por el uplink
-            _log.exception("fallo cerrando el uplink")
+            _log.exception("fallo desconectando el uplink")
+        try:
+            self._client.loop_stop()
+        except Exception:  # noqa: BLE001 — el apagado no falla por el uplink
+            _log.exception("fallo parando el bucle del uplink")
 
 
 def warn_if_key_is_exposed(key: Path) -> None:
@@ -112,6 +126,7 @@ def build_client(hub_id: str, endpoint: str, ca: Path, cert: Path, key: Path) ->
     client.reconnect_delay_set(min_delay=1, max_delay=120)
     client.on_connect = _on_connect
     client.on_disconnect = _on_disconnect
+    client.on_connect_fail = _make_on_connect_fail()
     client.connect_async(endpoint, _PORT, keepalive=_KEEPALIVE_S)
     client.loop_start()
     return client
@@ -140,3 +155,46 @@ def _on_disconnect(
     properties: object = None,
 ) -> None:
     _log.warning("uplink desconectado (%s), reintentando en segundo plano", reason_code)
+
+
+# Cuántos intentos fallidos deben pasar, tras el primero de cada episodio,
+# antes del siguiente warning. `reconnect_delay_set(max_delay=120)` hace que
+# paho reintente cada 120 s en régimen, así que 30 son ~1 hora entre avisos:
+# suficiente para seguir viendo el problema en los logs sin que meses de hogar
+# desconectado llenen el tope de 50 MB (ver docker-compose.yml) con un
+# warning cada dos minutos y entrenen a cualquiera a ignorarlo.
+_WARN_EVERY_N_FAILURES = 30
+
+
+def _make_on_connect_fail() -> Callable[[object, object], None]:
+    """Fábrica del callback `on_connect_fail`, con back-off de logging propio.
+
+    Sin asignar este callback, un `reconnect()` que falla —DNS que no
+    resuelve, 8883 filtrado por el router del hogar, TLS rechazado por un
+    certificado revocado, endpoint mal copiado— no deja ningún rastro:
+    `_handle_on_connect_fail` de paho solo loguea en `MQTT_LOG_DEBUG`, a un
+    logger que nadie ha habilitado, y `_on_disconnect` no aplica aquí porque
+    solo salta si hubo conexión previa. Tras "uplink habilitado hacia ..." el
+    hub se queda en silencio absoluto para siempre, indistinguible desde el
+    log de un hogar tranquilo.
+
+    Se usa una fábrica (closure) y no una función a nivel de módulo para que
+    cada cliente lleve su propio contador de intentos fallidos: el aviso se
+    atenúa por episodio de desconexión, sin estado compartido entre clientes
+    (y sin que un test deje contaminado el contador del siguiente).
+
+    Atenuación: se loguea el primer fallo del episodio —para que se note en
+    cuanto pasa— y luego solo uno de cada `_WARN_EVERY_N_FAILURES`.
+    """
+    failures = itertools.count(1)
+
+    def _on_connect_fail(client: object, userdata: object) -> None:
+        n = next(failures)
+        if n == 1 or n % _WARN_EVERY_N_FAILURES == 0:
+            _log.warning(
+                "uplink no logra conectar a AWS IoT (intento nº %d de este "
+                "episodio) — revisa endpoint/certificados/conectividad",
+                n,
+            )
+
+    return _on_connect_fail

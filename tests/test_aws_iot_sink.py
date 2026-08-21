@@ -3,7 +3,13 @@ import os
 import stat
 
 from vitahub.models import Event
-from vitahub.sinks.aws_iot import AwsIotSink, topic_for, warn_if_key_is_exposed
+from vitahub.sinks.aws_iot import (
+    _WARN_EVERY_N_FAILURES,
+    AwsIotSink,
+    _make_on_connect_fail,
+    topic_for,
+    warn_if_key_is_exposed,
+)
 
 
 def _event() -> Event:
@@ -19,11 +25,19 @@ def _event() -> Event:
 
 
 class _FakeClient:
-    def __init__(self, fail: bool = False) -> None:
+    def __init__(
+        self,
+        fail: bool = False,
+        fail_disconnect: bool = False,
+        fail_loop_stop: bool = False,
+    ) -> None:
         self.published: list[tuple[str, str, int]] = []
+        self.calls: list[str] = []
         self.stopped = False
         self.disconnected = False
         self._fail = fail
+        self._fail_disconnect = fail_disconnect
+        self._fail_loop_stop = fail_loop_stop
 
     def publish(self, topic: str, payload: str, qos: int) -> object:
         if self._fail:
@@ -32,9 +46,15 @@ class _FakeClient:
         return None
 
     def loop_stop(self) -> None:
+        self.calls.append("loop_stop")
+        if self._fail_loop_stop:
+            raise RuntimeError("loop_stop caído")
         self.stopped = True
 
     def disconnect(self) -> None:
+        self.calls.append("disconnect")
+        if self._fail_disconnect:
+            raise RuntimeError("disconnect caído")
         self.disconnected = True
 
 
@@ -64,6 +84,95 @@ def test_close_stops_the_loop_and_disconnects():
     AwsIotSink(client, "vita/hub/hub-1/events").close()
     assert client.stopped
     assert client.disconnected
+
+
+def test_close_disconnects_before_stopping_the_loop():
+    # Orden documentado de paho: disconnect() antes que loop_stop(). Hoy
+    # funciona al revés por accidente de la implementación de paho (ver el
+    # comentario en AwsIotSink.close) — sin un DISCONNECT limpio, un apagado
+    # ordenado es indistinguible de un corte de luz hasta que vence el
+    # keepalive.
+    client = _FakeClient()
+    AwsIotSink(client, "vita/hub/hub-1/events").close()
+    assert client.calls == ["disconnect", "loop_stop"]
+
+
+def test_close_stops_the_loop_even_if_disconnect_raises():
+    client = _FakeClient(fail_disconnect=True)
+    AwsIotSink(client, "vita/hub/hub-1/events").close()
+    assert client.stopped  # loop_stop se intenta igual, cada uno en su try/except
+
+
+def test_close_disconnect_already_happened_even_if_loop_stop_raises():
+    client = _FakeClient(fail_loop_stop=True)
+    AwsIotSink(client, "vita/hub/hub-1/events").close()
+    assert client.disconnected  # disconnect va primero y no depende de loop_stop
+
+
+def test_on_connect_fail_logs_the_first_failure_of_an_episode(caplog):
+    caplog.set_level("WARNING")
+    on_connect_fail = _make_on_connect_fail()
+    on_connect_fail(_FakeClient(), None)
+    assert "no logra conectar" in caplog.text
+
+
+def test_on_connect_fail_throttles_repeated_failures(caplog):
+    # Sin atenuar, con paho reintentando cada 120 s en régimen, meses de
+    # hogar sin uplink llenarían el log con un warning cada dos minutos.
+    caplog.set_level("WARNING")
+    on_connect_fail = _make_on_connect_fail()
+
+    on_connect_fail(_FakeClient(), None)  # intento 1: logueado
+    assert "no logra conectar" in caplog.text
+
+    caplog.clear()
+    for _ in range(_WARN_EVERY_N_FAILURES - 2):  # intentos 2..N-1: atenuados
+        on_connect_fail(_FakeClient(), None)
+    assert caplog.text == ""
+
+    on_connect_fail(_FakeClient(), None)  # intento N: logueado de nuevo
+    assert "no logra conectar" in caplog.text
+
+
+def test_on_connect_fail_counters_are_independent_per_client(caplog):
+    # Cada llamada a _make_on_connect_fail (una por cliente, en build_client)
+    # arranca su propio contador: un cliente no hereda el episodio de otro.
+    caplog.set_level("WARNING")
+    first = _make_on_connect_fail()
+    second = _make_on_connect_fail()
+
+    first(_FakeClient(), None)
+    caplog.clear()
+
+    second(_FakeClient(), None)
+    assert "no logra conectar" in caplog.text
+
+
+def test_event_json_has_exactly_the_eight_fields_the_iot_rule_expects():
+    """Alambrada del contrato con el SQL de la regla de IoT.
+
+    `lib/hub-ingest-stack.ts` (repo `vitaplus-aws-architecture`) NO usa
+    `SELECT *`: enumera los campos de primer nivel a propósito (ver el
+    comentario junto al SQL de `HubEventsRule`), para que un `hub_id`
+    falsificado en el payload no pueda colarse en la tabla de otro hogar. Si
+    este test se pone rojo, alguien ha añadido o quitado un campo de primer
+    nivel a `Event` sin tocar el SQL de la regla en el otro repositorio: el
+    campo nuevo se publicaría igual por MQTT, pero la regla lo descartaría en
+    silencio antes de llegar a DynamoDB, sin error en ningún sitio. Actualiza
+    el `SELECT` de `HubEventsRule` en `lib/hub-ingest-stack.ts` a la vez que
+    cambies esto.
+    """
+    keys = set(json.loads(_event().to_json()))
+    assert keys == {
+        "schema_version",
+        "hub_id",
+        "camera_id",
+        "camera_name",
+        "type",
+        "severity",
+        "timestamp",
+        "payload",
+    }
 
 
 def test_warns_when_the_private_key_is_readable_by_others(tmp_path, caplog):
