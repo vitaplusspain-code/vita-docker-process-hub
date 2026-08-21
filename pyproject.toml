@@ -37,8 +37,3 @@ strict = true
 module = ["ultralytics.*", "cv2.*"]
 ignore_missing_imports = true
 follow_imports = "skip"
-
-[[tool.mypy.overrides]]
-module = ["paho.*"]
-ignore_missing_imports = true
-follow_imports = "skip"

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ssl
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Protocol
 
 from vitahub.logging_setup import get_logger
 from vitahub.models import Event
@@ -26,8 +26,12 @@ class MqttClient(Protocol):
     """
 
     def publish(self, topic: str, payload: str, qos: int) -> object: ...
-    def loop_stop(self) -> None: ...
-    def disconnect(self) -> None: ...
+    # `-> object`, no `-> None`: paho devuelve `MQTTErrorCode` en los tres
+    # métodos y no lo comprobamos (ver `emit`/`close`, que atrapan la
+    # excepción en vez de mirar el código de retorno). `object` es lo mínimo
+    # que describe correctamente lo que paho ofrece de verdad.
+    def loop_stop(self) -> object: ...
+    def disconnect(self) -> object: ...
 
 
 def topic_for(prefix: str, hub_id: str) -> str:
@@ -85,9 +89,15 @@ def build_client(hub_id: str, endpoint: str, ca: Path, cert: Path, key: Path) ->
     """
     import paho.mqtt.client as mqtt
 
+    # `paho.mqtt.client` no re-exporta `CallbackAPIVersion` explícitamente
+    # (vive en `paho.mqtt.enums`), y con `strict` mypy no lo acepta como
+    # `mqtt.CallbackAPIVersion` por `no-implicit-reexport`. Se importa de su
+    # módulo real.
+    from paho.mqtt.enums import CallbackAPIVersion
+
     warn_if_key_is_exposed(key)
     client = mqtt.Client(
-        mqtt.CallbackAPIVersion.VERSION2,
+        CallbackAPIVersion.VERSION2,
         # La policy de IoT exige clientId == nombre del thing == hub_id. Con
         # otro valor, el broker rechaza la conexión sin más explicación.
         client_id=hub_id,
@@ -104,9 +114,7 @@ def build_client(hub_id: str, endpoint: str, ca: Path, cert: Path, key: Path) ->
     client.on_disconnect = _on_disconnect
     client.connect_async(endpoint, _PORT, keepalive=_KEEPALIVE_S)
     client.loop_start()
-    # `follow_imports = "skip"` (ver override de mypy) deja `client` como Any;
-    # el cast documenta que solo usamos de él la superficie de MqttClient.
-    return cast(MqttClient, client)
+    return client
 
 
 def _on_connect(
