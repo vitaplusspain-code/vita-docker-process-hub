@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -14,6 +15,14 @@ from vitahub.models import Camera
 
 class ConfigError(Exception):
     pass
+
+
+# Misma expresión que scripts/provision-hub.sh (repo vitaplus-aws-architecture):
+# el hub_id viaja al nombre del thing, al clientId MQTT y al topic, y un
+# carácter fuera de este conjunto rompe alguno de los tres de forma distinta
+# y silenciosa. provision-hub.sh valida esto en el lado de AWS; sin la misma
+# guarda aquí, un hub_id inválido solo se descubriría al intentar conectar.
+_HUB_ID_RE = re.compile(r"^[a-zA-Z0-9:_-]+$")
 
 
 @dataclass
@@ -106,9 +115,20 @@ def _uplink_from_raw(raw: Mapping[str, object], env: Mapping[str, str]) -> Uplin
     instalado y no reporta nada.
     """
     enabled = bool(raw.get("enabled", False))
-    topic_prefix = str(raw.get("topic_prefix", "vita/hub"))
-    if not topic_prefix:
-        raise ConfigError("Campo 'uplink.topic_prefix' no puede estar vacío")
+    # `raw.get(..., default)` solo aplica el default cuando la clave falta:
+    # un `topic_prefix:` con valor nulo (errata trivial en YAML) devuelve
+    # `None`, no el default, y antes esto se envolvía en `str(...)` sin más
+    # comprobación — `str(None)` es la cadena "None", que no está vacía y
+    # colaba la guarda siguiente. El topic quedaba `None/<hub_id>/events`, la
+    # policy de IoT lo denegaba, y sin el aviso del Arreglo 2 no se enteraba
+    # nadie. Se exige explícitamente que sea `str`.
+    raw_prefix = raw.get("topic_prefix", "vita/hub")
+    if not isinstance(raw_prefix, str) or not raw_prefix:
+        raise ConfigError(
+            "Campo 'uplink.topic_prefix' debe ser una cadena no vacía "
+            f"(recibido: {raw_prefix!r})"
+        )
+    topic_prefix = raw_prefix
     if not enabled:
         return UplinkConfig(enabled=False, topic_prefix=topic_prefix)
 
@@ -151,9 +171,17 @@ def load_config(path: Path, env: Mapping[str, str]) -> HubConfig:
     if not isinstance(raw, dict):
         raise ConfigError("La config raíz debe ser un mapping YAML")
 
-    hub_id = raw.get("hub_id")
-    if not hub_id:
+    hub_id_raw = raw.get("hub_id")
+    if not hub_id_raw:
         raise ConfigError("Falta 'hub_id' en la config")
+    hub_id = str(hub_id_raw)
+    if not _HUB_ID_RE.match(hub_id):
+        raise ConfigError(
+            f"'hub_id' {hub_id!r} contiene caracteres no permitidos — solo letras, "
+            "números, ':', '_' y '-' (misma regla que scripts/provision-hub.sh del "
+            "repo vitaplus-aws-architecture, porque hub_id compone el topic MQTT, "
+            "el clientId y el nombre del thing)"
+        )
 
     disc_raw = raw.get("discovery") or {}
     if not isinstance(disc_raw, dict):
@@ -199,7 +227,7 @@ def load_config(path: Path, env: Mapping[str, str]) -> HubConfig:
         )
 
     return HubConfig(
-        hub_id=str(hub_id),
+        hub_id=hub_id,
         discovery=DiscoveryConfig(interval_seconds=interval_seconds),
         inference=InferenceConfig(
             detector=str(inf_raw.get("detector", "person_yolo")),
