@@ -224,11 +224,34 @@ export: lo resuelve `provision-hub.sh` con `aws iot describe-endpoint --endpoint
 ### 5.3 La regla
 
 ```sql
-SELECT *,
+SELECT topic(3) AS hub_id,
+       schema_version, camera_id, camera_name, type, severity, timestamp, payload,
        concat(timestamp, '#', camera_id, '#', type) AS sk,
        floor(timestamp() / 1000) + 7776000 AS expires_at
 FROM 'vita/hub/+/events'
 ```
+
+> **Corregido el 2026-08-21, durante la implementación.** Este spec decía originalmente
+> `SELECT *, concat(...)`, y la revisión final de la rama encontró el agujero: `hub_id` es la
+> clave de partición de la tabla, y con el comodín salía del **payload** — que el emisor
+> controla — en vez del topic. La policy de IoT acota el *topic* al thing que se conecta, pero
+> nada acotaba el *campo*: quien tuviera el certificado de una casa podía publicar en su propio
+> topic autorizado con `{"hub_id": "otro-hogar"}` y escribir en la partición de otra familia,
+> mientras §3 de este mismo documento afirmaba que eso era imposible.
+>
+> Se descartó el arreglo mínimo (`SELECT *, topic(3) AS hub_id`) porque depende de que el alias
+> **sobreescriba** el campo del payload, y AWS no documenta esa regla en ningún sitio: todos los
+> ejemplos de `SELECT *, <expr> AS <name>` de la referencia oficial añaden una clave nueva,
+> ninguno pisa una existente. Una propiedad de seguridad no se apoya en comportamiento no
+> documentado.
+
+**`hub_id` sale del topic, no del mensaje.** `topic(3)` es el segmento que IoT ya autenticó
+contra el certificado al aceptar la conexión. Por eso **no** se usa `SELECT *`: sin enumerar,
+el `hub_id` del payload entraría en la tabla.
+
+**El precio, que hay que recordar:** si el evento gana un campo de primer nivel, hay que añadirlo
+a este SELECT o no llegará a la tabla. Los ocho campos enumerados son el contrato de §3, y
+`schema_version` existe para señalar el momento en que cambie.
 
 **La clave de ordenación es compuesta, no solo `timestamp`.** Dos cámaras del mismo hub pueden
 emitir en el mismo instante ISO y una se comería a la otra en silencio.
