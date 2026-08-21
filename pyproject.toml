@@ -6,6 +6,7 @@ dependencies = [
     "opencv-python-headless>=4.9",
     "ultralytics>=8.2",
     "PyYAML>=6.0",
+    "paho-mqtt>=2.1",
 ]
 
 [project.optional-dependencies]
@@ -34,5 +35,10 @@ strict = true
 
 [[tool.mypy.overrides]]
 module = ["ultralytics.*", "cv2.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+module = ["paho.*"]
 ignore_missing_imports = true
 follow_imports = "skip"
