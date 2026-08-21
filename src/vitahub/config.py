@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -14,6 +15,14 @@ from vitahub.models import Camera
 
 class ConfigError(Exception):
     pass
+
+
+# Misma expresión que scripts/provision-hub.sh (repo vitaplus-aws-architecture):
+# el hub_id viaja al nombre del thing, al clientId MQTT y al topic, y un
+# carácter fuera de este conjunto rompe alguno de los tres de forma distinta
+# y silenciosa. provision-hub.sh valida esto en el lado de AWS; sin la misma
+# guarda aquí, un hub_id inválido solo se descubriría al intentar conectar.
+_HUB_ID_RE = re.compile(r"^[a-zA-Z0-9:_-]+$")
 
 
 @dataclass
@@ -35,6 +44,21 @@ class Credentials:
     onvif_password: str
 
 
+# Rutas por defecto de los tres ficheros que deja scripts/provision-hub.sh
+# (repo vitaplus-aws-architecture) en el Jetson.
+_DEFAULT_CERT_DIR = "/data/certs"
+
+
+@dataclass
+class UplinkConfig:
+    enabled: bool = False
+    topic_prefix: str = "vita/hub"
+    endpoint: str = ""
+    ca_path: str = ""
+    cert_path: str = ""
+    key_path: str = ""
+
+
 @dataclass
 class HubConfig:
     hub_id: str
@@ -42,6 +66,7 @@ class HubConfig:
     inference: InferenceConfig
     cameras: list[Camera]
     credentials: Credentials
+    uplink: UplinkConfig = field(default_factory=UplinkConfig)
 
 
 def _credentials_from_env(env: Mapping[str, str]) -> Credentials:
@@ -80,6 +105,63 @@ def _cameras_from_raw(raw: list[dict[str, object]]) -> list[Camera]:
     return cameras
 
 
+def _uplink_from_raw(raw: Mapping[str, object], env: Mapping[str, str]) -> UplinkConfig:
+    """Lee la sección `uplink` y verifica que la instalación está completa.
+
+    Falla el arranque a propósito cuando `enabled` es true y falta algo: es un
+    error de instalación, y el técnico que sembró el certificado ESTÁ delante.
+    Mismo criterio que `_credentials_from_env` con la credencial ONVIF. Un
+    uplink que arranca en silencio sin poder publicar es un hogar que parece
+    instalado y no reporta nada.
+    """
+    enabled = bool(raw.get("enabled", False))
+    # `raw.get(..., default)` solo aplica el default cuando la clave falta:
+    # un `topic_prefix:` con valor nulo (errata trivial en YAML) devuelve
+    # `None`, no el default, y antes esto se envolvía en `str(...)` sin más
+    # comprobación — `str(None)` es la cadena "None", que no está vacía y
+    # colaba la guarda siguiente. El topic quedaba `None/<hub_id>/events`, la
+    # policy de IoT lo denegaba, y sin el aviso del Arreglo 2 no se enteraba
+    # nadie. Se exige explícitamente que sea `str`.
+    raw_prefix = raw.get("topic_prefix", "vita/hub")
+    if not isinstance(raw_prefix, str) or not raw_prefix:
+        raise ConfigError(
+            "Campo 'uplink.topic_prefix' debe ser una cadena no vacía "
+            f"(recibido: {raw_prefix!r})"
+        )
+    topic_prefix = raw_prefix
+    if not enabled:
+        return UplinkConfig(enabled=False, topic_prefix=topic_prefix)
+
+    endpoint = env.get("VITAHUB_IOT_ENDPOINT", "")
+    if not endpoint:
+        raise ConfigError(
+            "uplink.enabled es true pero falta la variable de entorno "
+            "VITAHUB_IOT_ENDPOINT (el endpoint ATS de la cuenta; lo imprime "
+            "scripts/provision-hub.sh del repo de arquitectura)"
+        )
+
+    paths = {
+        "ca_path": env.get("VITAHUB_IOT_CA", f"{_DEFAULT_CERT_DIR}/AmazonRootCA1.pem"),
+        "cert_path": env.get("VITAHUB_IOT_CERT", f"{_DEFAULT_CERT_DIR}/certificate.pem.crt"),
+        "key_path": env.get("VITAHUB_IOT_KEY", f"{_DEFAULT_CERT_DIR}/private.pem.key"),
+    }
+    for name, value in paths.items():
+        if not Path(value).is_file():
+            raise ConfigError(
+                f"uplink.enabled es true pero no existe el fichero de certificado "
+                f"{value} ({name}) — siémbralo con scripts/provision-hub.sh"
+            )
+
+    return UplinkConfig(
+        enabled=True,
+        topic_prefix=topic_prefix,
+        endpoint=endpoint,
+        ca_path=paths["ca_path"],
+        cert_path=paths["cert_path"],
+        key_path=paths["key_path"],
+    )
+
+
 def load_config(path: Path, env: Mapping[str, str]) -> HubConfig:
     credentials = _credentials_from_env(env)
     try:
@@ -89,9 +171,17 @@ def load_config(path: Path, env: Mapping[str, str]) -> HubConfig:
     if not isinstance(raw, dict):
         raise ConfigError("La config raíz debe ser un mapping YAML")
 
-    hub_id = raw.get("hub_id")
-    if not hub_id:
+    hub_id_raw = raw.get("hub_id")
+    if not hub_id_raw:
         raise ConfigError("Falta 'hub_id' en la config")
+    hub_id = str(hub_id_raw)
+    if not _HUB_ID_RE.match(hub_id):
+        raise ConfigError(
+            f"'hub_id' {hub_id!r} contiene caracteres no permitidos — solo letras, "
+            "números, ':', '_' y '-' (misma regla que scripts/provision-hub.sh del "
+            "repo vitaplus-aws-architecture, porque hub_id compone el topic MQTT, "
+            "el clientId y el nombre del thing)"
+        )
 
     disc_raw = raw.get("discovery") or {}
     if not isinstance(disc_raw, dict):
@@ -100,6 +190,10 @@ def load_config(path: Path, env: Mapping[str, str]) -> HubConfig:
     inf_raw = raw.get("inference") or {}
     if not isinstance(inf_raw, dict):
         raise ConfigError("Sección 'inference' debe ser un mapping YAML")
+
+    up_raw = raw.get("uplink") or {}
+    if not isinstance(up_raw, dict):
+        raise ConfigError("Sección 'uplink' debe ser un mapping YAML")
 
     try:
         interval_seconds = int(disc_raw.get("interval_seconds", 60))
@@ -133,7 +227,7 @@ def load_config(path: Path, env: Mapping[str, str]) -> HubConfig:
         )
 
     return HubConfig(
-        hub_id=str(hub_id),
+        hub_id=hub_id,
         discovery=DiscoveryConfig(interval_seconds=interval_seconds),
         inference=InferenceConfig(
             detector=str(inf_raw.get("detector", "person_yolo")),
@@ -143,6 +237,7 @@ def load_config(path: Path, env: Mapping[str, str]) -> HubConfig:
         ),
         cameras=_cameras_from_raw(raw.get("cameras") or []),
         credentials=credentials,
+        uplink=_uplink_from_raw(up_raw, env),
     )
 
 

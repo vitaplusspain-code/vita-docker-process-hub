@@ -13,7 +13,7 @@ from vitahub.analytics.event_engine import EventEngine
 from vitahub.config import ConfigError, load_config
 from vitahub.control import admin_port, start_control_server
 from vitahub.discovery.onvif import discover
-from vitahub.factory import build_detector
+from vitahub.factory import build_detector, build_sink
 from vitahub.ingest.rtsp import (
     backoff_delay,
     is_stalled,
@@ -24,7 +24,6 @@ from vitahub.logging_setup import configure_logging, get_logger, register_secret
 from vitahub.models import Camera, Event
 from vitahub.rescan import RescanService
 from vitahub.sinks.base import EventSink
-from vitahub.sinks.stdout_json import StdoutJsonSink
 from vitahub.supervisor import CameraSupervisor
 from vitahub.worker import process_frame
 
@@ -63,7 +62,7 @@ def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
     detector = build_detector(cfg.inference, weights_path)
     engine = EventEngine(cfg.hub_id)
     monitor = ConnectionMonitor(cfg.hub_id)
-    sink = StdoutJsonSink()
+    sink = build_sink(cfg)
 
     def worker(camera: Camera, rtsp_url: str, cam_stop: threading.Event) -> None:
         _camera_loop(  # type: ignore[no-untyped-call]
@@ -104,7 +103,7 @@ def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
 
 
 def _shutdown(
-    httpd: ThreadingHTTPServer | None, supervisor: CameraSupervisor, sink: StdoutJsonSink
+    httpd: ThreadingHTTPServer | None, supervisor: CameraSupervisor, sink: EventSink
 ) -> None:
     """Cierra en orden y con cada paso garantizado pase lo que pase con el anterior.
 

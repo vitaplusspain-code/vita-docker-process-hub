@@ -6,6 +6,7 @@ dependencies = [
     "opencv-python-headless>=4.9",
     "ultralytics>=8.2",
     "PyYAML>=6.0",
+    "paho-mqtt>=2.1",
 ]
 
 [project.optional-dependencies]

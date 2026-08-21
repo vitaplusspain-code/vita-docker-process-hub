@@ -49,6 +49,21 @@ def test_missing_hub_id_raises(tmp_path):
         load_config(_write(tmp_path, "discovery: {}\n"), ENV)
 
 
+def test_hub_id_with_invalid_characters_is_rejected(tmp_path):
+    # hub_id viaja al topic MQTT, al clientId y al nombre del thing; un '/'
+    # rompe el topic tal y como lo compone topic_for(). scripts/provision-hub.sh
+    # (repo vitaplus-aws-architecture) valida la misma expresión del otro lado.
+    path = tmp_path / "hub.yaml"
+    path.write_text("hub_id: hub/casa lopez\n")
+    with pytest.raises(ConfigError, match="hub_id"):
+        load_config(path, ENV)
+
+
+def test_hub_id_with_colon_and_dash_is_accepted(tmp_path):
+    cfg = load_config(_write(tmp_path, "hub_id: hub:casa-lopez_1\n"), ENV)
+    assert cfg.hub_id == "hub:casa-lopez_1"
+
+
 def test_defaults_applied_when_sections_absent(tmp_path):
     cfg = load_config(_write(tmp_path, "hub_id: hub-x\n"), ENV)
     assert cfg.discovery.interval_seconds == 60
@@ -257,3 +272,86 @@ def test_saved_yaml_never_contains_credentials(tmp_path):
         ],
     )
     assert "secreto" not in path.read_text()
+
+
+UPLINK_YAML = VALID_YAML + """
+uplink:
+  enabled: true
+  topic_prefix: vita/hub
+"""
+
+
+def _certs(tmp_path: Path) -> dict[str, str]:
+    """Crea los tres ficheros de certificado y devuelve el entorno que los apunta."""
+    env = dict(ENV)
+    for var, name in (
+        ("VITAHUB_IOT_CA", "AmazonRootCA1.pem"),
+        ("VITAHUB_IOT_CERT", "certificate.pem.crt"),
+        ("VITAHUB_IOT_KEY", "private.pem.key"),
+    ):
+        path = tmp_path / name
+        path.write_text("x")
+        env[var] = str(path)
+    env["VITAHUB_IOT_ENDPOINT"] = "abc123-ats.iot.eu-west-1.amazonaws.com"
+    return env
+
+
+def test_config_without_uplink_section_keeps_it_disabled(tmp_path):
+    # Un hub ya instalado, con un hub.yaml anterior a este slice, arranca igual.
+    cfg = load_config(_write(tmp_path, VALID_YAML), ENV)
+    assert cfg.uplink.enabled is False
+
+
+def test_enabled_uplink_without_endpoint_raises(tmp_path):
+    with pytest.raises(ConfigError, match="VITAHUB_IOT_ENDPOINT"):
+        load_config(_write(tmp_path, UPLINK_YAML), ENV)
+
+
+def test_enabled_uplink_without_certificate_file_raises(tmp_path):
+    # Las tres VITAHUB_IOT_* deben apuntar explícitamente a rutas inexistentes
+    # bajo tmp_path: sin esto, el test caía en los defaults de /data/certs/ y
+    # dependía de que ese directorio NO existiera en la máquina que corre el
+    # test. En un Jetson —el hardware objetivo— sí existe, porque ahí es
+    # donde provision-hub.sh siembra los certificados de verdad.
+    env = dict(ENV)
+    env["VITAHUB_IOT_ENDPOINT"] = "abc123-ats.iot.eu-west-1.amazonaws.com"
+    missing = tmp_path / "no-such-certs"
+    env["VITAHUB_IOT_CA"] = str(missing / "AmazonRootCA1.pem")
+    env["VITAHUB_IOT_CERT"] = str(missing / "certificate.pem.crt")
+    env["VITAHUB_IOT_KEY"] = str(missing / "private.pem.key")
+    with pytest.raises(ConfigError, match="no existe el fichero de certificado"):
+        load_config(_write(tmp_path, UPLINK_YAML), env)
+
+
+def test_enabled_uplink_loads_endpoint_and_paths(tmp_path):
+    env = _certs(tmp_path)
+    cfg = load_config(_write(tmp_path, UPLINK_YAML), env)
+    assert cfg.uplink.enabled is True
+    assert cfg.uplink.topic_prefix == "vita/hub"
+    assert cfg.uplink.endpoint == env["VITAHUB_IOT_ENDPOINT"]
+    assert cfg.uplink.key_path == env["VITAHUB_IOT_KEY"]
+
+
+def test_empty_topic_prefix_is_rejected(tmp_path):
+    yaml_text = VALID_YAML + "\nuplink:\n  enabled: true\n  topic_prefix: ''\n"
+    with pytest.raises(ConfigError, match="topic_prefix"):
+        load_config(_write(tmp_path, yaml_text), _certs(tmp_path))
+
+
+def test_null_topic_prefix_is_rejected(tmp_path):
+    # `topic_prefix:` sin valor (errata trivial en YAML) es `None`, y antes
+    # `str(None)` producía la cadena "None" — no vacía, así que colaba la
+    # guarda de "no vacío" y el topic quedaba `None/<hub_id>/events`.
+    yaml_text = VALID_YAML + "\nuplink:\n  topic_prefix:\n"
+    with pytest.raises(ConfigError, match="topic_prefix"):
+        load_config(_write(tmp_path, yaml_text), ENV)
+
+
+def test_save_cameras_preserves_the_uplink_section(tmp_path):
+    # El hub reescribe hub.yaml en cada descubrimiento. Si save_cameras se
+    # comiera la sección uplink, el hogar dejaría de reportar tras el primer
+    # rescan y nadie relacionaría una cosa con la otra.
+    path = _write(tmp_path, UPLINK_YAML)
+    save_cameras(path, [])
+    assert "uplink:" in path.read_text()
+    assert "enabled: true" in path.read_text()

@@ -11,8 +11,8 @@ de cada hogar**. Se conecta a las cámaras IP de la casa, convierte el vídeo en
 solo sale texto.
 
 Alcance de esta versión (primer slice): **descubrimiento de cámaras + ingesta RTSP + detección de
-persona (presencia y conteo) + eventos JSON por stdout**. No hay envío a AWS todavía — la costura
-está preparada (ver [backlog.md](backlog.md)).
+persona (presencia y conteo) + eventos JSON por stdout**, con un **uplink opcional a AWS IoT Core**
+(ver «A dónde van los eventos» más abajo).
 
 ## Vista general
 
@@ -40,16 +40,16 @@ está preparada (ver [backlog.md](backlog.md)).
                                                          eventos│
                                                          ┌──────▼───────┐
                                                          │     sink     │  (enchufable:
-                                                         │  stdout JSON │   AWS mañana)
+                                                         │  stdout JSON │   AWS opcional)
                                                          └──────────────┘
 ```
 
 Dos ideas de diseño que conviene retener:
 
 - **Dos costuras enchufables.** `Detector` (visión) y `EventSink` (salida) son interfaces
-  abstractas. Hoy hay `StubDetector`/`PersonDetector` y `StdoutJsonSink`; mañana entran detección de
-  caídas de persona (visión avanzada, subsistema C del spec del primer slice) o un `AwsSink` **sin
-  tocar el resto**.
+  abstractas. Hoy hay `StubDetector`/`PersonDetector` para visión y `StdoutJsonSink`/`FanoutSink`/
+  `AwsIotSink` para salida; mañana entra la detección de caídas de persona (visión avanzada,
+  subsistema C del spec del primer slice) **sin tocar el resto**.
 - **Identidad de cámara por serie ONVIF, no por IP.** Si el router le cambia la IP a una cámara tras
   un corte, el hub la reconoce como la misma y no la duplica.
 
@@ -69,8 +69,8 @@ Dos ideas de diseño que conviene retener:
 | `inference/` | `Detector` (interfaz), `StubDetector` (tests), `PersonDetector` (YOLO). |
 | `analytics/event_engine.py` | Máquina de estados anti-parpadeo: detecciones → eventos. |
 | `analytics/connection_monitor.py` | Éxitos y fallos de conexión → eventos `camera_unreachable` / `camera_reachable`. |
-| `sinks/` | `EventSink` (interfaz) y `StdoutJsonSink` (salida JSON por stdout). |
-| `factory.py` | Construye el `Detector` según la config (`stub` / `person_yolo`). |
+| `sinks/` | `EventSink` (interfaz), `StdoutJsonSink`, `FanoutSink` (aísla fallos entre sinks) y `AwsIotSink` (MQTT/TLS a AWS IoT Core). |
+| `factory.py` | Construye el `Detector` según la config (`stub` / `person_yolo`) y el `EventSink` según `uplink.enabled`. |
 | `worker.py` | `process_frame`: detecta, cuenta, alimenta el motor, emite por el sink. |
 | `logging_setup.py` | Logs JSON a **stderr** + redacción de secretos. |
 
@@ -127,7 +127,8 @@ Por cada cámara habilitada con URI resuelta se lanza un hilo *daemon* que:
   - `person_absent` — 0 personas sostenidas **5 s** (más largo, para tolerar oclusiones breves).
   - `person_count_changed` — el conteo cambia entre valores no-cero y se estabiliza.
 - El evento se serializa **en un único punto** (`EventSink.emit`). Hoy `StdoutJsonSink` escribe una
-  línea JSON por evento a **stdout**. (Esa es la costura del futuro `AwsSink`.)
+  línea JSON por evento a **stdout**, y con el uplink encendido el mismo evento sale también por
+  `AwsIotSink` (ver «A dónde van los eventos» más abajo).
 
 Además de los eventos de presencia, el hub emite **eventos de conexión**:
 
@@ -140,6 +141,31 @@ Además de los eventos de presencia, el hub emite **eventos de conexión**:
 El umbral es holgado a propósito: un tirón de cable tarda ~30 s solo en que el watchdog de FFmpeg lo
 detecte, más el backoff. Por debajo de eso saldrían avisos falsos cada vez que alguien desenchufa
 algo.
+
+### A dónde van los eventos
+
+`build_sink` (en `factory.py`) decide el destino a partir de `uplink.enabled`:
+
+- **Apagado** (por defecto): un `StdoutJsonSink` pelado, exactamente como antes de este
+  slice.
+- **Encendido**: un `FanoutSink` con dos destinos — el mismo `stdout` de siempre **y** un
+  `AwsIotSink` que publica en `vita/hub/<hub_id>/events` de AWS IoT Core por MQTT con TLS
+  mutuo.
+
+Por MQTT sale byte a byte el mismo JSON que ves en `docker logs`: es `Event.to_json()` en
+los dos casos, un solo esquema que mantener.
+
+Ningún fallo del uplink **en marcha** tumba nada. Un `publish` que lanza se traga en el
+`AwsIotSink`, y si aun así escapara, el `FanoutSink` lo aísla para que `stdout` reciba
+igual, y por encima están el `try` de `_emit_all` y el del bucle de cámara. Un hogar sin
+internet sigue detectando; lo único que pierde son los eventos de ese rato, porque no hay
+cola.
+
+Esto es distinto de un fallo **al construir** el cliente: `build_client` (llamado una vez,
+en el arranque) sí puede fallar rápido y a propósito si un certificado está truncado o es
+ilegible, y `build_sink` lo traduce a un `ConfigError` legible en vez de dejar escapar el
+`ssl.SSLError` crudo — mismo criterio de *fail-fast* que el resto de `load_config` (§4.4
+del spec): es un error de instalación y el técnico está delante.
 
 ### 5. Salud y apagado
 - El bucle principal refresca `/data/heartbeat` cada 5 s; el `HEALTHCHECK` de Docker
@@ -182,7 +208,8 @@ Una línea JSON por evento en stdout:
 - `severity` es `info` para presencia; `medium` ya existe para los eventos de conexión
   (`camera_unreachable`) — `high`/`critical` siguen sin usarse, reservados para una futura caída de
   persona (aún no implementada, ver arriba).
-- `schema_version` permite que el `AwsSink` futuro evolucione el formato sin romper consumidores.
+- `schema_version` permite que el `AwsIotSink` (y quien consuma en DynamoDB al otro lado) evolucione
+  el formato sin romper consumidores.
 
 ## Separación stdout / stderr
 
@@ -204,6 +231,9 @@ inference:
   sample_fps: 2
   confidence: 0.4
   stream: substream         # "substream" (Channels/2) ahorra CPU; "main" para más resolución
+uplink:
+  enabled: false             # true para publicar los eventos en AWS IoT Core (ver más abajo)
+  topic_prefix: vita/hub
 cameras: []                 # se autopobla al descubrir
 ```
 
@@ -218,6 +248,10 @@ cameras: []                 # se autopobla al descubrir
 | `VITAHUB_LOG_LEVEL` | `INFO` | Nivel de log. |
 | `VITAHUB_ADMIN_TOKEN` | — (vacío = deshabilitado) | Token de `POST /rescan`. Sin él no se abre puerto. |
 | `VITAHUB_ADMIN_PORT` | `8787` | Puerto del endpoint de control. |
+| `VITAHUB_IOT_ENDPOINT` | — (obligatoria si `uplink.enabled`) | Endpoint ATS de AWS IoT Core. |
+| `VITAHUB_IOT_CA` | `/data/certs/AmazonRootCA1.pem` | CA raíz para el TLS mutuo. |
+| `VITAHUB_IOT_CERT` | `/data/certs/certificate.pem.crt` | Certificado del hogar. |
+| `VITAHUB_IOT_KEY` | `/data/certs/private.pem.key` | Clave privada del hogar. |
 
 ## Empaquetado y despliegue
 
@@ -241,7 +275,8 @@ Documentadas en detalle en [backlog.md](backlog.md). Las de más impacto:
   está apagado a la vez (firmware que lo desactiva al reiniciar), la URI recordada apunta a una IP
   muerta y no hay forma automática de recuperarla — solo queda el evento `camera_unreachable`. La
   defensa es una reserva DHCP por MAC en el router de cada hogar (ver [backlog.md](backlog.md)).
-- **Sin comando remoto**: el `POST /rescan` solo es alcanzable desde la LAN del hogar. El
-  disparo desde la nube llegará con el uplink (ver [backlog.md](backlog.md)).
+- **Sin comando remoto**: el `POST /rescan` solo es alcanzable desde la LAN del hogar. El uplink
+  (arriba) ya sube eventos, pero el downlink que dispararía un rescan desde la nube necesita permisos
+  de IoT que hoy no se conceden (ver [backlog.md](backlog.md)).
 - **Endpoints ONVIF asumidos** (`:10000` y rutas fijas): funciona con la cámara piloto (Tuya), pero
   otros modelos usan otros puertos/rutas. El siguiente slice los derivará de `XAddrs`.

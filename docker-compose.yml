@@ -27,5 +27,11 @@ services:
       # Sin token, el endpoint de control no abre puerto (queda solo el rescan periódico).
       VITAHUB_ADMIN_TOKEN: ${VITAHUB_ADMIN_TOKEN:-}
       VITAHUB_ADMIN_PORT: ${VITAHUB_ADMIN_PORT:-8787}
+      # Vacío por defecto: solo es obligatorio con uplink.enabled: true, y de
+      # eso ya se queja load_config con un mensaje que dice qué falta.
+      VITAHUB_IOT_ENDPOINT: ${VITAHUB_IOT_ENDPOINT:-}
+      VITAHUB_IOT_CA: ${VITAHUB_IOT_CA:-/data/certs/AmazonRootCA1.pem}
+      VITAHUB_IOT_CERT: ${VITAHUB_IOT_CERT:-/data/certs/certificate.pem.crt}
+      VITAHUB_IOT_KEY: ${VITAHUB_IOT_KEY:-/data/certs/private.pem.key}
     volumes:
       - ./data:/data
