@@ -124,27 +124,13 @@ def build_client(hub_id: str, endpoint: str, ca: Path, cert: Path, key: Path) ->
         tls_version=ssl.PROTOCOL_TLSv1_2,
     )
     client.reconnect_delay_set(min_delay=1, max_delay=120)
-    client.on_connect = _on_connect
+    on_connect, on_connect_fail = _make_connect_callbacks()
+    client.on_connect = on_connect
     client.on_disconnect = _on_disconnect
-    client.on_connect_fail = _make_on_connect_fail()
+    client.on_connect_fail = on_connect_fail
     client.connect_async(endpoint, _PORT, keepalive=_KEEPALIVE_S)
     client.loop_start()
     return client
-
-
-def _on_connect(
-    client: object,
-    userdata: object,
-    flags: object,
-    reason_code: object,
-    properties: object = None,
-) -> None:
-    # reason_code 0 (o Success en paho 2) es el único caso bueno; cualquier
-    # otro suele ser certificado no adjunto al thing o policy mal acotada.
-    if str(reason_code) in ("0", "Success"):
-        _log.info("uplink conectado a AWS IoT")
-    else:
-        _log.warning("uplink rechazado por el broker: %s", reason_code)
 
 
 def _on_disconnect(
@@ -166,10 +152,13 @@ def _on_disconnect(
 _WARN_EVERY_N_FAILURES = 30
 
 
-def _make_on_connect_fail() -> Callable[[object, object], None]:
-    """Fábrica del callback `on_connect_fail`, con back-off de logging propio.
+def _make_connect_callbacks() -> tuple[
+    Callable[[object, object, object, object, object], None],
+    Callable[[object, object], None],
+]:
+    """Fábrica de `on_connect` y `on_connect_fail`, compartiendo un contador.
 
-    Sin asignar este callback, un `reconnect()` que falla —DNS que no
+    Sin un callback de fallo, un `reconnect()` que no cuaja —DNS que no
     resuelve, 8883 filtrado por el router del hogar, TLS rechazado por un
     certificado revocado, endpoint mal copiado— no deja ningún rastro:
     `_handle_on_connect_fail` de paho solo loguea en `MQTT_LOG_DEBUG`, a un
@@ -178,15 +167,42 @@ def _make_on_connect_fail() -> Callable[[object, object], None]:
     hub se queda en silencio absoluto para siempre, indistinguible desde el
     log de un hogar tranquilo.
 
-    Se usa una fábrica (closure) y no una función a nivel de módulo para que
-    cada cliente lleve su propio contador de intentos fallidos: el aviso se
-    atenúa por episodio de desconexión, sin estado compartido entre clientes
-    (y sin que un test deje contaminado el contador del siguiente).
+    El aviso se atenúa (ver `_WARN_EVERY_N_FAILURES`): se loguea el primer
+    fallo del episodio —para que se note en cuanto pasa— y luego solo uno de
+    cada `_WARN_EVERY_N_FAILURES`, para que meses de hogar desconectado no
+    llenen el tope de 50 MB del log con un warning cada dos minutos.
 
-    Atenuación: se loguea el primer fallo del episodio —para que se note en
-    cuanto pasa— y luego solo uno de cada `_WARN_EVERY_N_FAILURES`.
+    El contador es de episodio, no de por vida del cliente: `on_connect` lo
+    resetea cada vez que la conexión tiene éxito, así que una desconexión
+    nueva —aunque el cliente ya arrastre fallos de episodios anteriores—
+    vuelve a avisar en su primer intento fallido, no a mitad de un ciclo de
+    30 heredado. Por eso ambos callbacks nacen de la misma fábrica: comparten
+    el contador por closure, y con `nonlocal` `on_connect` puede reiniciarlo.
+
+    Se usa una fábrica (closure) y no funciones a nivel de módulo para que
+    cada cliente lleve su propio contador: el estado no se comparte entre
+    clientes (y un test no deja contaminado el contador del siguiente). Hay
+    un test (`test_on_connect_fail_counters_are_independent_per_client`) que
+    lo comprueba.
     """
     failures = itertools.count(1)
+
+    def _on_connect(
+        client: object,
+        userdata: object,
+        flags: object,
+        reason_code: object,
+        properties: object = None,
+    ) -> None:
+        nonlocal failures
+        # reason_code 0 (o Success en paho 2) es el único caso bueno;
+        # cualquier otro suele ser certificado no adjunto al thing o policy
+        # mal acotada, y no es una conexión real: no reinicia el episodio.
+        if str(reason_code) in ("0", "Success"):
+            _log.info("uplink conectado a AWS IoT")
+            failures = itertools.count(1)
+        else:
+            _log.warning("uplink rechazado por el broker: %s", reason_code)
 
     def _on_connect_fail(client: object, userdata: object) -> None:
         n = next(failures)
@@ -197,4 +213,4 @@ def _make_on_connect_fail() -> Callable[[object, object], None]:
                 n,
             )
 
-    return _on_connect_fail
+    return _on_connect, _on_connect_fail
