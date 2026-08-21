@@ -1,10 +1,11 @@
 # Cómo probar el hub
 
-Tres niveles, de más rápido a más real:
+Cuatro niveles, de más rápido a más real:
 
 1. **Tests automáticos** — verifican la lógica; no necesitan cámara ni Docker.
 2. **Arranque local en seco** (detector `stub`) — confirma que el proceso arranca y descubre.
 3. **Extremo a extremo con cámara real** — ver eventos `person_detected` de verdad.
+4. **Uplink a AWS** — confirmar que los eventos también llegan a la cuenta real (opcional).
 
 Para entender qué hace por dentro, ver [como-funciona.md](como-funciona.md).
 
@@ -19,7 +20,7 @@ pip install -e ".[dev]"
 pytest -v
 ```
 
-Deberías ver **142 tests en verde**. Además, las mismas puertas que corren en CI:
+Deberías ver **161 tests en verde**. Además, las mismas puertas que corren en CI:
 
 ```bash
 ruff check src tests
@@ -36,9 +37,13 @@ Los tests cubren toda la **lógica pura y determinista**, sin red ni hardware:
 - Helpers RTSP (backoff, muestreo, watchdog, inyección de credenciales en la URL).
 - Filtro del detector de personas (clase persona + umbral) con un modelo falso inyectado.
 - Redacción de secretos en logs; envelope de evento; healthcheck.
+- Uplink a AWS: el `AwsIotSink` y el `FanoutSink` con un cliente MQTT falso — topic, payload exacto,
+  que un `publish` fallido no propaga y que el fanout aísla fallos entre sinks. La validación de la
+  config (`uplink.enabled` sin endpoint o sin certificados → el hub no arranca).
 
-**No se cubren en CI (por diseño):** el descubrimiento ONVIF real por multicast y la captura RTSP
-con OpenCV — necesitan una LAN y una cámara. Eso se valida a mano (paso 3).
+**No se cubren en CI (por diseño):** el descubrimiento ONVIF real por multicast, la captura RTSP con
+OpenCV y la conexión MQTT real contra AWS IoT Core — necesitan una LAN, una cámara y una cuenta AWS.
+Eso se valida a mano (paso 3 y «Uplink a AWS» más abajo).
 
 ---
 
@@ -252,12 +257,30 @@ y para cámaras que nunca vayan a hablar ONVIF.
 
 ---
 
+## 4. Uplink a AWS
+
+En CI no se prueba contra AWS: los tests del sink usan un cliente MQTT falso, así que
+cubren el topic, el payload exacto, que un publish fallido no propaga y que el fanout
+aísla fallos — **pero no** que el certificado sea válido, que la policy autorice el topic
+ni que la regla escriba en DynamoDB. Eso solo se comprueba contra la cuenta real:
+
+1. `uplink.enabled: true` con los certificados sembrados → en el log aparece
+   `uplink habilitado hacia vita/hub/<hub_id>/events` y luego `uplink conectado a AWS IoT`.
+2. Provoca un evento delante de una cámara → el ítem aparece en la tabla
+   `vita-dev-hub-events` **y** la línea sigue saliendo en `docker logs`.
+3. Desenchufa la red del Jetson → sigue detectando y logueando, no se reinicia; en el log
+   sale `uplink desconectado`. Al volver la red, los eventos nuevos llegan otra vez.
+
+---
+
 ## Diagnóstico rápido
 
 | Síntoma | Causa probable / qué mirar |
 |---|---|
 | `config inválida: Falta la variable de entorno VITAHUB_ONVIF_PASSWORD` | No exportaste la credencial. |
 | `config inválida: Falta 'hub_id'` | El fichero de config no existe o no tiene `hub_id` (en Docker: no sembraste `./data/hub.yaml`). |
+| `uplink.enabled es true pero falta la variable de entorno VITAHUB_IOT_ENDPOINT` | No exportaste el endpoint que imprimió `provision-hub.sh`. |
+| `uplink.enabled es true pero no existe el fichero de certificado ...` | Falta sembrar `./data/certs/` con lo que dejó `provision-hub.sh` (ver README, «Uplink a AWS»). |
 | `descubrimiento: 0 cámaras encontradas` | La cámara no está en la LAN, ONVIF apagado, o el multicast no llega (WiFi que aísla clientes; con Docker asegúrate de `network_mode: host`). |
 | `cam ... no abre, reintento en Ns` en bucle | La cámara se descubrió pero el RTSP no abre: credencial incorrecta, ruta/puerto RTSP distintos, o la cámara requiere auth que no cuadra. |
 | No salen eventos aunque hay alguien | ¿`detector: stub`? (no emite). ¿confianza muy alta? Baja `confidence`. ¿Muy poca resolución? Prueba `stream: main`. |
@@ -270,7 +293,7 @@ y para cámaras que nunca vayan a hablar ONVIF.
 
 ## Verificación previa a integrar (checklist)
 
-- [ ] `pytest -v` → 142 verdes.
+- [ ] `pytest -v` → 161 verdes.
 - [ ] `ruff check src tests` y `mypy` limpios.
 - [ ] Arranque en seco (`stub`): descubre o avisa de 0 cámaras, sin caerse.
 - [ ] Extremo a extremo con cámara real: `person_detected` al entrar y `person_absent` al salir.

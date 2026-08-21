@@ -28,13 +28,10 @@ reales). Funciona para la cámara piloto (Tuya en `:10000`), pero **no para otro
 (`:80`/`:8000`, rutas distintas). Trabajo: parsear puerto+ruta desde `XAddrs` para el device
 service, y resolver el media service vía capabilities/`GetServices` en vez de adivinarlo.
 
-### 3. Uplink a AWS (cruza al repo de arquitectura)
-- Stack `02-hub-ingest` en `vitaplus-aws-architecture` (candidato: AWS IoT Core — MQTT/TLS, registro
-  de dispositivos y eventos de conexión nativos).
-- Implementar `sinks/aws.py` (`EventSink`) en este repo — la costura ya está lista, es un swap de un
-  fichero.
-- Telemetría de conexión (F): emitir `camera_connected`/`camera_disconnected`/`hub_online` por el
-  sink cuando exista consumidor.
+### 3. ~~Uplink a AWS~~ — HECHO (slice de 2026-08-21)
+
+Los eventos suben a AWS IoT Core por MQTT/TLS y se guardan en DynamoDB. Ver
+`docs/superpowers/specs/2026-08-21-uplink-eventos-aws-design.md`.
 
 ### 4. Watchdog real de proceso (decisión pendiente)
 `restart: unless-stopped` solo actúa cuando el proceso **sale**; el `HEALTHCHECK` de Docker
@@ -47,9 +44,10 @@ Opciones a decidir (no es una decisión de este repo, es de despliegue):
   `unhealthy`. Más simple, corre en el propio Jetson, sin tocar el host.
 - **`systemd` en el Jetson**: unidad con `Restart=` vigilando el propio `docker run`/`compose`, o un
   watchdog a nivel de host que compruebe `/data/heartbeat` directamente.
-- **Supervisión desde la nube**: si el hub deja de reportar (cuando exista el uplink del punto 3),
-  la nube puede pedir un reinicio remoto o alertar a un humano — más lento pero con visibilidad
-  centralizada.
+- **Supervisión desde la nube**: el uplink del punto 3 ya existe, pero le faltan los eventos de
+  presencia de IoT (`hub_online`/`hub_offline`, ver «Diferidos del slice de uplink» más abajo); con
+  ellos, la nube podría pedir un reinicio remoto o alertar a un humano si el hub deja de reportar —
+  más lento pero con visibilidad centralizada.
 No introducir ningún mecanismo hasta decidir cuál encaja con el despliegue real (uno o varios
 Jetsons por hogar, acceso remoto disponible o no, etc.).
 
@@ -177,6 +175,20 @@ después.
   sobre el mismo RTSP, eventos de presencia duplicados y doble decodificación/inferencia en el Jetson
   sin que nada lo señale. Mitigación manual hoy: borrar la entrada a mano del YAML en cuanto aparezca
   la descubierta. Arreglo de código pendiente de diseñar (¿deduplicar por URI RTSP normalizada?).
+
+### Diferidos del slice de uplink (2026-08-21)
+
+- **Sin cola: lo que no sale, se pierde.** Decisión consciente del slice. Duele en la
+  línea base personal, que es el núcleo del producto: un hueco de tres horas no es un dato
+  perdido, es una rutina mal aprendida. Primer candidato del siguiente slice de uplink.
+- **Downlink**: el rescan remoto necesita `Subscribe`/`Receive` en la policy de IoT, que
+  hoy no se conceden. La costura sigue lista: `RescanService.run_once()`.
+- **Eventos de presencia de IoT** (`$aws/events/presence/…`) para `hub_online` /
+  `hub_offline`: es lo que cierra el punto 4 de este backlog (supervisión desde la nube de
+  un hub colgado). Es configuración de cuenta, no un recurso del stack.
+- **El estado del `ConnectionMonitor` sigue solo en memoria.** Este backlog ya avisaba de
+  que pasa a importar "en cuanto exista el uplink a AWS" — y ya existe. Un episodio
+  `camera_unreachable` que nunca se cierra ahora llega a una tabla que alguien consultará.
 
 ## Verificación pendiente en hardware real
 Las partes de red (descubrimiento ONVIF, captura RTSP) no corren en CI por diseño. Validar
