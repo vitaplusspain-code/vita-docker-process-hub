@@ -355,3 +355,44 @@ def test_save_cameras_preserves_the_uplink_section(tmp_path):
     save_cameras(path, [])
     assert "uplink:" in path.read_text()
     assert "enabled: true" in path.read_text()
+
+
+def test_fall_defaults_disabled(tmp_path):
+    cfg = load_config(_write(tmp_path, "hub_id: hub-x\n"), ENV)
+    assert cfg.inference.fall.enabled is False
+    assert cfg.inference.fall.min_score == 0.3
+
+
+def test_fall_enabled_requires_pose_detector(tmp_path):
+    path = _write(tmp_path, "hub_id: hub-x\ninference:\n  detector: person_yolo\n  fall:\n    enabled: true\n")
+    with pytest.raises(ConfigError, match="person_pose"):
+        load_config(path, ENV)
+
+
+def test_fall_enabled_with_pose_detector(tmp_path):
+    path = _write(
+        tmp_path,
+        "hub_id: hub-x\ninference:\n  detector: person_pose\n  fall:\n    enabled: true\n    min_score: 0.5\n",
+    )
+    cfg = load_config(path, ENV)
+    assert cfg.inference.detector == "person_pose"
+    assert cfg.inference.fall.enabled is True
+    assert cfg.inference.fall.min_score == 0.5
+
+
+def test_fall_min_score_not_numeric_raises(tmp_path):
+    path = _write(tmp_path, "hub_id: hub-x\ninference:\n  fall:\n    min_score: alto\n")
+    with pytest.raises(ConfigError, match="min_score"):
+        load_config(path, ENV)
+
+
+def test_fall_min_score_out_of_range_raises(tmp_path):
+    path = _write(tmp_path, "hub_id: hub-x\ninference:\n  fall:\n    min_score: 1.5\n")
+    with pytest.raises(ConfigError, match="min_score"):
+        load_config(path, ENV)
+
+
+def test_fall_section_must_be_mapping(tmp_path):
+    path = _write(tmp_path, "hub_id: hub-x\ninference:\n  fall: si\n")
+    with pytest.raises(ConfigError, match="inference.fall"):
+        load_config(path, ENV)

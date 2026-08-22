@@ -31,11 +31,20 @@ class DiscoveryConfig:
 
 
 @dataclass
+class FallConfig:
+    enabled: bool = False
+    # Score mínimo para emitir fall_detected. Bajo a propósito: quien filtra
+    # es el consumidor en AWS; el hub emite candidatos con su fiabilidad.
+    min_score: float = 0.3
+
+
+@dataclass
 class InferenceConfig:
     detector: str = "person_yolo"
     sample_fps: float = 2.0
     confidence: float = 0.4
     stream: str = "substream"
+    fall: FallConfig = field(default_factory=FallConfig)
 
 
 @dataclass
@@ -162,6 +171,28 @@ def _uplink_from_raw(raw: Mapping[str, object], env: Mapping[str, str]) -> Uplin
     )
 
 
+def _fall_from_raw(raw: object, detector: str) -> FallConfig:
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ConfigError("Sección 'inference.fall' debe ser un mapping YAML")
+    enabled = bool(raw.get("enabled", False))
+    try:
+        min_score = float(raw.get("min_score", 0.3))
+    except (ValueError, TypeError) as exc:
+        raise ConfigError("Campo 'inference.fall.min_score' no es numérico") from exc
+    if not 0.0 <= min_score <= 1.0:
+        raise ConfigError("Campo 'inference.fall.min_score' debe estar entre 0 y 1")
+    if enabled and detector != "person_pose":
+        # Sin keypoints la analítica solo vería cajas: funcionaría a medias y
+        # en silencio. Mejor negarse a arrancar con un mensaje que diga qué cambiar.
+        raise ConfigError(
+            "inference.fall.enabled requiere 'inference.detector: person_pose' "
+            f"(recibido: {detector!r})"
+        )
+    return FallConfig(enabled=enabled, min_score=min_score)
+
+
 def load_config(path: Path, env: Mapping[str, str]) -> HubConfig:
     credentials = _credentials_from_env(env)
     try:
@@ -226,14 +257,16 @@ def load_config(path: Path, env: Mapping[str, str]) -> HubConfig:
             f"(recibido: {stream!r})"
         )
 
+    detector = str(inf_raw.get("detector", "person_yolo"))
     return HubConfig(
         hub_id=hub_id,
         discovery=DiscoveryConfig(interval_seconds=interval_seconds),
         inference=InferenceConfig(
-            detector=str(inf_raw.get("detector", "person_yolo")),
+            detector=detector,
             sample_fps=sample_fps,
             confidence=confidence,
             stream=stream,
+            fall=_fall_from_raw(inf_raw.get("fall"), detector),
         ),
         cameras=_cameras_from_raw(raw.get("cameras") or []),
         credentials=credentials,
