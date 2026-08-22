@@ -849,9 +849,13 @@ def test_no_event_before_two_seconds_on_floor():
 
 def test_slow_lie_down_scores_low_and_respects_min_score():
     eng, clock = _engine(min_score=0.5)
-    # Sin transición brusca: aparece ya tumbada y no se mueve (drop_speed = 0)
+    # Sin transición brusca: aparece ya tumbada y no se mueve (drop_speed = 0),
+    # así que el score es 0.35 + 0.05·s de suelo. La permanencia sola acaba
+    # superando 0.5 a los 3 s (por diseño: seguir en el suelo es cada vez más
+    # sospechoso), así que esta rama se limita a 2.5 s de suelo (score 0.475).
+    seq_short = [[lying()]] * 6
+    assert _feed(eng, clock, seq_short) == []
     seq = [[lying()]] * 8
-    assert _feed(eng, clock, seq) == []
     eng2, clock2 = _engine(min_score=0.3)
     events = _feed(eng2, clock2, seq)
     assert [e.type for e in events] == ["fall_detected"]
