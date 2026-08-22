@@ -56,3 +56,15 @@ def test_camera_uris_default_to_empty():
     cam = Camera(id="a", name="camera-1", last_ip="10.0.0.5")
     assert cam.rtsp_main == ""
     assert cam.rtsp_sub == ""
+
+
+def test_detection_keypoints_default_none():
+    d = Detection(label="person", confidence=0.9, bbox=(0, 0, 10, 20))
+    assert d.keypoints is None
+
+
+def test_detection_accepts_keypoints():
+    kps = tuple((float(i), float(i), 0.9) for i in range(17))
+    d = Detection(label="person", confidence=0.9, bbox=(0, 0, 10, 20), keypoints=kps)
+    assert d.keypoints is not None
+    assert len(d.keypoints) == 17
