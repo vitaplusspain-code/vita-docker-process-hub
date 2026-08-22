@@ -20,7 +20,7 @@ pip install -e ".[dev]"
 pytest -v
 ```
 
-Deberías ver **161 tests en verde**. Además, las mismas puertas que corren en CI:
+Deberías ver **229 tests en verde**. Además, las mismas puertas que corren en CI:
 
 ```bash
 ruff check src tests
@@ -40,10 +40,17 @@ Los tests cubren toda la **lógica pura y determinista**, sin red ni hardware:
 - Uplink a AWS: el `AwsIotSink` y el `FanoutSink` con un cliente MQTT falso — topic, payload exacto,
   que un `publish` fallido no propaga y que el fanout aísla fallos entre sinks. La validación de la
   config (`uplink.enabled` sin endpoint o sin certificados → el hub no arranca).
+- Caídas: `test_fall_signals.py` (señales y score, puros), `test_fall_engine.py` (máquina de estados
+  de episodio con reloj inyectado y poses sintéticas), `test_pose_detector.py` (mapeo de resultados
+  Ultralytics falsos a `Detection` con `keypoints`) y `test_replay_video.py` (el CLI de calibración
+  sobre frames sintéticos).
 
 **No se cubren en CI (por diseño):** el descubrimiento ONVIF real por multicast, la captura RTSP con
-OpenCV y la conexión MQTT real contra AWS IoT Core — necesitan una LAN, una cámara y una cuenta AWS.
-Eso se valida a mano (paso 3 y «Uplink a AWS» más abajo).
+OpenCV, la conexión MQTT real contra AWS IoT Core y el rendimiento real de `yolo11n-pose` en el Orin
+— necesitan una LAN, una cámara, una cuenta AWS o el hardware del Jetson. Eso se valida a mano (paso
+3, «Uplink a AWS» y «Calibrar caídas con un vídeo» más abajo); el coste de `yolo11n-pose` con 4
+cámaras en Orin se mide en campo y se anota aquí cuando haya datos (ver también
+[backlog.md](backlog.md)).
 
 ---
 
@@ -113,6 +120,10 @@ export VITAHUB_WEIGHTS=yolo11n.pt
 
 python -m vitahub.app
 ```
+
+Para `person_pose`, `VITAHUB_POSE_WEIGHTS=yolo11n-pose.pt` y descárgalo antes con
+`python scripts/download_model.py yolo11n-pose.pt` (desde este slice, si el fichero no existe el
+hub no arranca y lo dice).
 
 Qué esperar:
 - En **stderr**: `descubrimiento: 1 cámaras`, `registro: added onvif-...`, `cam onvif-... conectada`.
@@ -255,6 +266,29 @@ Con `id` elegido a mano pierdes la identidad estable por número de serie: si un
 descubre por ONVIF, entrará como una cámara **distinta**, con su `onvif-<serie>`. Úsalo para pruebas
 y para cámaras que nunca vayan a hablar ONVIF.
 
+### 3.6 Calibrar caídas con un vídeo
+
+`scripts/replay_video.py` pasa un `.mp4` grabado por el pipeline de caídas (detector `person_pose` +
+`FallEngine`) sin necesidad de cámara en vivo ni de esperar a que alguien se caiga de verdad. Sirve
+para calibrar pesos y umbrales antes de ir a un hogar.
+
+Graba 3-4 clips cortos (con una persona real, en la oficina): caída frontal, caída lateral, tumbarse
+en el sofá y agacharse a coger algo. Con los pesos de pose descargados (§3.2 más arriba):
+
+```bash
+python scripts/replay_video.py caida-frontal.mp4 --weights yolo11n-pose.pt
+```
+
+Imprime por **stdout** los eventos `fall_*` en JSON-lines (igual que el hub) y por **stderr** un
+resumen (`frames`, recuento de eventos por tipo, `max_score`). Flags: `--fps` (muestreo, 2 por
+defecto), `--min-score` (umbral, 0.3 por defecto), `--presence` (imprime también los `person_*`, que
+por defecto se filtran).
+
+Qué comprobar: el **orden de los scores** debe ser caída > tumbarse en el sofá > agacharse — y
+agacharse **no** debe llegar a emitir `fall_detected` (se queda en `candidate` y vuelve a `upright`).
+Si el orden sale distinto, o agacharse dispara, toca revisar los pesos/umbrales de
+`fall_signals.py`/`fall_engine.py` antes de desplegar en un hogar.
+
 ---
 
 ## 4. Uplink a AWS
@@ -289,11 +323,12 @@ ni que la regla escriba en DynamoDB. Eso solo se comprueba contra la cuenta real
 | `POST /rescan` no conecta | El hub arrancó sin `VITAHUB_ADMIN_TOKEN` (mira el log `control HTTP deshabilitado`), o el puerto 8787 está ocupado por otro servicio del Jetson. |
 | `POST /rescan` da 409 | No es un error: ya hay un escaneo en curso (puede tardar minutos, ver arriba). Espera y consulta el log, no reintentes en bucle corto. |
 | `OSError: Read-only file system: '/app'` al arrancar en local | `VITAHUB_WEIGHTS` apunta a la ruta del contenedor (`/app/models/...`). En local: `export VITAHUB_WEIGHTS=yolo11n.pt` (o usa `detector: stub`). |
+| `pesos del modelo no encontrados en X` | Descarga con `python scripts/download_model.py X` o usa `detector: stub`. |
 | Sale `camera_unreachable` | La cámara lleva 5 min sin conectar: comprueba que está encendida, que su IP no ha cambiado y que la URI del registro sigue siendo válida. |
 
 ## Verificación previa a integrar (checklist)
 
-- [ ] `pytest -v` → 161 verdes.
+- [ ] `pytest -v` → 229 verdes.
 - [ ] `ruff check src tests` y `mypy` limpios.
 - [ ] Arranque en seco (`stub`): descubre o avisa de 0 cámaras, sin caerse.
 - [ ] Extremo a extremo con cámara real: `person_detected` al entrar y `person_absent` al salir.

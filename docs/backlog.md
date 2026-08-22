@@ -77,10 +77,12 @@ que el hub recuerde la URI. Una cámara con ONVIF estable elimina la clase enter
 - **`event_engine`:** `_required_hold(old, new)` no usa `old` (parámetro muerto).
 - **`app.py`:** `cap` se libera tras el `stop.wait(delay)` del backoff en vez de antes (higiene de
   recursos, no bug); `run()` no tiene cobertura de tests (código de integración).
-- **`person_yolo.from_weights`:** si el fichero de pesos (`VITAHUB_WEIGHTS`) no existe, Ultralytics
+- ~~**`person_yolo.from_weights`:** si el fichero de pesos (`VITAHUB_WEIGHTS`) no existe, Ultralytics
   intenta descargarlo al directorio padre de esa ruta — que puede ser de solo lectura (p. ej. el
   `/app/models` del contenedor corriendo en local) — y peta con un traceback confuso. Dar un error
-  claro ("pesos no encontrados en X") antes de invocar `YOLO()`.
+  claro ("pesos no encontrados en X") antes de invocar `YOLO()`.~~ — **HECHO** (slice de detección de
+  caídas, 2026-08-22): `factory._require_weights` comprueba el fichero y lanza `ConfigError` con la
+  ruta antes de invocar `YOLO()`; se aplica a los dos detectores (`person_yolo` y `person_pose`).
 - **Workflow obsoleto:** `.github/workflows/event-engine-ci.yml` referencia rutas inexistentes
   (`services/event-engine`, `tests/event_engine`) — candidato a limpieza.
 
@@ -188,7 +190,22 @@ después.
   un hub colgado). Es configuración de cuenta, no un recurso del stack.
 - **El estado del `ConnectionMonitor` sigue solo en memoria.** Este backlog ya avisaba de
   que pasa a importar "en cuanto exista el uplink a AWS" — y ya existe. Un episodio
-  `camera_unreachable` que nunca se cierra ahora llega a una tabla que alguien consultará.
+  `camera_unreachable` que nunca se cierra ahora llega a una tabla que alguien consultará. Lo
+  mismo aplica a los episodios del `FallEngine`.
+
+### Diferidos del slice de caídas (2026-08-22)
+
+Del §8 del spec (`docs/superpowers/specs/2026-08-22-deteccion-caidas-design.md`); ninguno bloquea la
+integración del slice.
+
+- Zonas de exclusión por cámara (sofá, cama) para bajar el score en ellas.
+- Tracker real si el IoU greedy confunde personas en hogares con más ocupación.
+- Clasificador temporal entrenado con los episodios recogidos (opción 3 del brainstorming).
+- Pasar pesos/umbrales a config si la calibración por hogar resulta necesaria.
+- Persistir el estado de episodios para emitir `fall_resolved` tras un reinicio (junto con la nota
+  del `ConnectionMonitor` de arriba).
+- Medir coste de `yolo11n-pose` en Orin con 4 cámaras; ajustar `--start-period` si la carga del
+  modelo de pose lo requiere.
 
 ## Verificación pendiente en hardware real
 Las partes de red (descubrimiento ONVIF, captura RTSP) no corren en CI por diseño. Validar

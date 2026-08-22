@@ -12,7 +12,8 @@ solo sale texto.
 
 Alcance de esta versión (primer slice): **descubrimiento de cámaras + ingesta RTSP + detección de
 persona (presencia y conteo) + eventos JSON por stdout**, con un **uplink opcional a AWS IoT Core**
-(ver «A dónde van los eventos» más abajo).
+(ver «A dónde van los eventos» más abajo) y **detección de caídas por pose** (opcional,
+`inference.fall`).
 
 ## Vista general
 
@@ -47,9 +48,9 @@ persona (presencia y conteo) + eventos JSON por stdout**, con un **uplink opcion
 Dos ideas de diseño que conviene retener:
 
 - **Dos costuras enchufables.** `Detector` (visión) y `EventSink` (salida) son interfaces
-  abstractas. Hoy hay `StubDetector`/`PersonDetector` para visión y `StdoutJsonSink`/`FanoutSink`/
-  `AwsIotSink` para salida; mañana entra la detección de caídas de persona (visión avanzada,
-  subsistema C del spec del primer slice) **sin tocar el resto**.
+  abstractas. Hoy hay `StubDetector`/`PersonDetector`/`PosePersonDetector` para visión y
+  `StdoutJsonSink`/`FanoutSink`/`AwsIotSink` para salida; la detección de caídas entró por esa
+  costura (`PosePersonDetector`) **sin tocar la presencia**.
 - **Identidad de cámara por serie ONVIF, no por IP.** Si el router le cambia la IP a una cámara tras
   un corte, el hub la reconoce como la misma y no la duplica.
 
@@ -67,11 +68,14 @@ Dos ideas de diseño que conviene retener:
 | `registry.py` | Reconcilia cámaras descubiertas con el registro persistido (por serie). |
 | `ingest/rtsp.py` | Helpers puros (backoff, muestreo, watchdog), apertura de captura y credenciales en la URL. |
 | `inference/` | `Detector` (interfaz), `StubDetector` (tests), `PersonDetector` (YOLO). |
+| `inference/person_pose_yolo.py` | `PosePersonDetector`: cajas + keypoints con `yolo11n-pose`. |
 | `analytics/event_engine.py` | Máquina de estados anti-parpadeo: detecciones → eventos. |
 | `analytics/connection_monitor.py` | Éxitos y fallos de conexión → eventos `camera_unreachable` / `camera_reachable`. |
+| `analytics/fall_signals.py` | Señales geométricas y score de caída a partir de una pose; funciones puras. |
+| `analytics/fall_engine.py` | `FallEngine`: pistas por persona y máquina de estados de episodio → eventos `fall_*`. |
 | `sinks/` | `EventSink` (interfaz), `StdoutJsonSink`, `FanoutSink` (aísla fallos entre sinks) y `AwsIotSink` (MQTT/TLS a AWS IoT Core). |
-| `factory.py` | Construye el `Detector` según la config (`stub` / `person_yolo`) y el `EventSink` según `uplink.enabled`. |
-| `worker.py` | `process_frame`: detecta, cuenta, alimenta el motor, emite por el sink. |
+| `factory.py` | Construye el `Detector` según la config (`stub` / `person_yolo` / `person_pose`) y el `EventSink` según `uplink.enabled`. |
+| `worker.py` | `process_frame`: detecta, cuenta, alimenta el motor de presencia y, si hay `fall_engine`, el de caídas; emite por el sink. |
 | `logging_setup.py` | Logs JSON a **stderr** + redacción de secretos. |
 
 ## El flujo, paso a paso
@@ -205,11 +209,86 @@ Una línea JSON por evento en stdout:
 ```
 
 - `camera_id` es la serie ONVIF (estable ante cambios de IP).
-- `severity` es `info` para presencia; `medium` ya existe para los eventos de conexión
-  (`camera_unreachable`) — `high`/`critical` siguen sin usarse, reservados para una futura caída de
-  persona (aún no implementada, ver arriba).
+- `severity` es `info` para presencia (y `fall_resolved`); `medium` para los eventos de conexión
+  (`camera_unreachable`); `high` para `fall_detected`/`fall_update` (ver «Caídas» más abajo) —
+  `critical` sigue sin usarse.
 - `schema_version` permite que el `AwsIotSink` (y quien consuma en DynamoDB al otro lado) evolucione
   el formato sin romper consumidores.
+
+## Caídas
+
+Opcional (`inference.fall.enabled`, requiere `detector: person_pose`). `PosePersonDetector` envuelve
+`yolo11n-pose` y devuelve, además de la caja de cada persona, sus 17 keypoints COCO. `FallEngine`
+recibe esas detecciones junto a las de presencia (mismo frame, mismo modelo) y por cada persona
+mantiene una **pista** (emparejada entre frames por IoU) con su propia máquina de estados:
+
+```
+upright ──tumbado──► candidate ──score ≥ min y ≥ 2 s en el suelo──► reported
+   ▲                    │                                             │
+   └──de pie 2 s────────┘         de pie 2 s, o pista perdida 3 s ────┘ → fall_resolved
+```
+
+En `candidate` se recalcula el score cada frame sin emitir nada — agacharse y levantarse pasa por
+aquí y vuelve a `upright` sin ruido. La entrada en `reported` emite **un** `fall_detected` por
+episodio; mientras sigue en el suelo, cada 10 s desde el último evento se emite `fall_update`; al
+salir (se levanta 2 s, o la pista desaparece 3 s) se emite `fall_resolved`.
+
+### Señales por persona
+
+Se calculan cada frame muestreado a partir de la pose. Un keypoint cuenta si su confianza es ≥ 0.3;
+si faltan los puntos necesarios, la señal vale `None` y su término del score pesa 0 (el resto se
+renormaliza).
+
+| Señal | Cálculo | Indica |
+|---|---|---|
+| `torso_angle` (grados) | Ángulo del vector (medio de hombros → medio de caderas) respecto a la vertical. 0° = de pie, 90° = horizontal. | Cuerpo tumbado |
+| `bbox_ratio` | Ancho / alto de la caja | Redundante con el anterior; útil si faltan keypoints |
+| `drop_speed` (alturas de caja / s) | Velocidad de descenso del medio de caderas (centro de la caja si faltan), normalizada por la altura de la caja, máxima en una ventana de 1.5 s. El engine **conserva el pico** desde que la persona dejó de estar de pie: el `fall_detected` sale ≥ 2 s después de la caída, fuera de la ventana, y sin ese pico la brusquedad nunca contaría | Transición brusca (caída) frente a lenta (tumbarse) |
+| `floor_time_s` | Segundos consecutivos con `torso_angle ≥ 60°` (o, sin keypoints, `bbox_ratio ≥ 1.2`) | Sigue en el suelo |
+| `head_low` (bool) | Nariz por debajo del medio de caderas, o nariz en el tercio inferior de la caja | Refuerzo de "tumbado" |
+| `keypoint_conf` | Media de confianza de los keypoints usados (hombros, caderas, nariz) | Calidad de la pose; se reporta, no puntúa |
+
+### Score
+
+Suma ponderada en [0, 1]. Cada término se mapea linealmente y se recorta a [0, 1]:
+
+| Término | Peso | Mapeo |
+|---|---|---|
+| Horizontalidad | 0.35 | `torso_angle` 45° → 0, 80° → 1 |
+| Brusquedad | 0.30 | `drop_speed` 0.3 → 0, 1.0 → 1 |
+| Permanencia | 0.25 | `floor_time_s` 0 → 0, 5 → 1 |
+| Cabeza baja | 0.10 | `head_low` 0 / 1 |
+
+Pesos, mapeos y umbrales son **constantes con comentario en `fall_engine.py`/`fall_signals.py`**, no
+config: se calibran con `scripts/replay_video.py` sobre vídeos reales (ver
+[como-probar.md](como-probar.md)). `inference.fall.min_score` sí es config — filtra qué episodios
+llegan a emitir `fall_detected`; se deja bajo a propósito, el filtrado fino lo hace AWS.
+
+### El evento
+
+Mismo envelope de siempre, tipos nuevos:
+
+```json
+{"schema_version":1,"hub_id":"hub-x","camera_id":"onvif-123","camera_name":"salon",
+ "type":"fall_detected","severity":"high","timestamp":"2026-08-22T10:15:02+00:00",
+ "payload":{
+   "episode_id":"onvif-123-1724321702",
+   "score":0.82,
+   "signals":{"torso_angle":74.1,"bbox_ratio":1.9,"drop_speed":0.85,
+              "floor_time_s":2.5,"head_low":true,"keypoint_conf":0.61},
+   "person_count":1
+ }}
+```
+
+| Tipo | Severity | Payload |
+|---|---|---|
+| `fall_detected` | `high` | `episode_id`, `score`, `signals`, `person_count` |
+| `fall_update` | `high` | Igual que `fall_detected`, recalculado |
+| `fall_resolved` | `info` | `episode_id`, `duration_s`, `max_score` |
+
+`episode_id` = `<camera_id>-<epoch de inicio del episodio>`: enlaza los tres eventos en AWS sin que
+el consumidor guarde estado. **El hub no notifica a nadie** — solo produce el dato; decidir a quién
+y cuándo avisar es un sistema futuro en AWS.
 
 ## Separación stdout / stderr
 
@@ -227,10 +306,13 @@ hub_id: hub-3f9a            # único por hogar, generado una vez
 discovery:
   interval_seconds: 60      # cadencia del redescubrimiento (debe ser > 0)
 inference:
-  detector: person_yolo     # o "stub"
+  detector: person_yolo     # "person_yolo", "person_pose" (cajas + pose, necesario para caídas) o "stub"
   sample_fps: 2
   confidence: 0.4
   stream: substream         # "substream" (Channels/2) ahorra CPU; "main" para más resolución
+  fall:
+    enabled: false          # true para emitir fall_detected/update/resolved (requiere detector: person_pose)
+    min_score: 0.3          # score mínimo para emitir; bajo a propósito, quien filtra es AWS
 uplink:
   enabled: false             # true para publicar los eventos en AWS IoT Core (ver más abajo)
   topic_prefix: vita/hub
@@ -245,6 +327,7 @@ cameras: []                 # se autopobla al descubrir
 | `VITAHUB_ONVIF_PASSWORD` | — (obligatoria) | Contraseña. **Nunca** va en el fichero ni en logs. |
 | `VITAHUB_CONFIG` | `/data/hub.yaml` | Ruta del fichero de config. |
 | `VITAHUB_WEIGHTS` | `/app/models/yolo11n.pt` | Pesos YOLO (embebidos en la imagen). |
+| `VITAHUB_POSE_WEIGHTS` | `/app/models/yolo11n-pose.pt` | Pesos de pose (`detector: person_pose`; embebidos en la imagen). |
 | `VITAHUB_LOG_LEVEL` | `INFO` | Nivel de log. |
 | `VITAHUB_ADMIN_TOKEN` | — (vacío = deshabilitado) | Token de `POST /rescan`. Sin él no se abre puerto. |
 | `VITAHUB_ADMIN_PORT` | `8787` | Puerto del endpoint de control. |

@@ -117,6 +117,12 @@ Certificado comprometido o Jetson perdido: se revoca ese hogar y solo ese, con
 `aws iot update-certificate --profile <perfil> --region <región> --new-status REVOKED --certificate-id <id>`
 (los mismos `--profile`/`--region` que imprime `provision-hub.sh`; en una emergencia no hay tiempo de adivinarlos).
 
+## Caídas (opcional)
+
+Pon `detector: person_pose` y `fall.enabled: true` (dentro de `inference:`) en `hub.yaml`. Salen
+eventos `fall_detected`/`fall_update`/`fall_resolved`, con `score` y `signals`, por stdout y por AWS
+(si el uplink está encendido). El hub no avisa a nadie: eso lo hará un sistema en AWS.
+
 ## Despliegue en Jetson Orin (GPU)
 
 ```bash

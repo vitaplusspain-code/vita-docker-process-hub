@@ -2,10 +2,13 @@ hub_id: hub-CAMBIAME        # genera uno único por hogar y no lo cambies
 discovery:
   interval_seconds: 60
 inference:
-  detector: person_yolo     # o "stub" para probar sin modelo
+  detector: person_yolo     # "person_yolo", "person_pose" (cajas + pose, necesario para caídas) o "stub"
   sample_fps: 2
   confidence: 0.4
   stream: substream         # "substream" ahorra CPU; "main" para más resolución
+  fall:
+    enabled: false          # true para emitir fall_detected/update/resolved (requiere detector: person_pose)
+    min_score: 0.3          # score mínimo para emitir; bajo a propósito, quien filtra es AWS
 uplink:
   enabled: false            # true para publicar los eventos en AWS IoT Core
   topic_prefix: vita/hub    # NO lo cambies por hogar: la policy de IoT lo lleva fijo,
