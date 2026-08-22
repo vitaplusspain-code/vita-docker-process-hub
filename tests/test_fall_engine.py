@@ -172,3 +172,35 @@ def test_per_camera_state_is_independent():
         events += eng.observe(other, [standing()], now)
         now += 0.5
     assert [(e.type, e.camera_id) for e in events] == [("fall_detected", "onvif-abc")]
+
+
+def test_sampling_gap_does_not_inflate_floor_time():
+    # El tiempo en el suelo es tiempo *observado*: un hueco de muestreo de
+    # 2.5 s solo suma MAX_STEP_S (1 s), no los 2.5 s de reloj.
+    eng, clock = _engine()
+    for now in (0.0, 0.5):
+        assert eng.observe(CAM, [standing()], now) == []
+        clock.advance(0.5)
+    assert eng.observe(CAM, [lying()], 1.0) == []  # floor_time 0
+    clock.advance(2.5)
+    assert eng.observe(CAM, [lying()], 3.5) == []  # hueco: +1.0 (tope), no +2.5
+    clock.advance(0.5)
+    assert eng.observe(CAM, [lying()], 4.0) == []  # 1.5
+    clock.advance(0.5)
+    events = eng.observe(CAM, [lying()], 4.5)  # 2.0
+    assert [e.type for e in events] == ["fall_detected"]
+    assert events[0].payload["signals"]["floor_time_s"] == 2.0
+
+
+def test_gap_then_reappear_resolves_and_starts_new_track():
+    # Sin llamadas a observe durante 5 s la pista caduca: al reaparecer, ese
+    # mismo frame resuelve el episodio y abre pista nueva (nada más).
+    eng, clock = _engine()
+    events = _feed(eng, clock, [[standing()]] * 2 + [[lying()]] * 6)
+    assert [e.type for e in events] == ["fall_detected"]
+    clock.advance(5.0)
+    late = eng.observe(CAM, [lying()], 8.5)
+    assert [e.type for e in late] == ["fall_resolved"]
+    assert late[0].payload["episode_id"] == events[0].payload["episode_id"]
+    clock.advance(0.5)
+    assert eng.observe(CAM, [lying()], 9.0) == []  # pista nueva: sigue en candidate

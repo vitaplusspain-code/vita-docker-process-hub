@@ -37,6 +37,10 @@ CONFIRM_FLOOR_S = 2.0
 CONFIRM_UPRIGHT_S = 2.0
 # Cadencia máxima de fall_update mientras sigue en el suelo.
 UPDATE_EVERY_S = 10.0
+# Tiempo máximo que suma una sola muestra a los acumuladores: el doble del
+# periodo de muestreo a 2 fps. Un hueco mayor (frames perdidos, worker
+# atascado) no cuenta como tiempo "visto" en el suelo ni de pie.
+MAX_STEP_S = 1.0
 
 _SEV_HIGH = "high"
 _SEV_INFO = "info"
@@ -62,8 +66,13 @@ class _Track:
     last_seen: float
     history: list[Sample] = field(default_factory=list)
     state: str = "upright"  # upright | candidate | reported
-    floor_since: float | None = None
-    upright_since: float | None = None
+    # Postura observada en el frame anterior: "" (pista nueva) | floor | upright | other.
+    posture: str = ""
+    # Tiempo *observado* en la postura actual: suma de pasos entre muestras
+    # (cada uno con tope MAX_STEP_S), no diferencia de reloj. Un hueco de
+    # muestreo no puede inflar el tiempo en el suelo.
+    floor_time: float = 0.0
+    upright_time: float = 0.0
     # Pico de drop_speed desde que dejó de estar de pie. La ventana de
     # drop_speed (1.5 s) es más corta que la confirmación (2 s): sin
     # conservar el pico, la brusquedad de la caída nunca llegaría al score.
@@ -97,11 +106,9 @@ class FallEngine:
         persons = [d for d in detections if d.label == "person"]
         events: list[Event] = []
 
-        matched = self._match(cam.tracks, persons)
-        for track, det in matched:
-            events += self._update_track(camera, track, det, now, len(persons))
-
-        # Pistas no vistas: caducan a los TRACK_TTL_S; si estaban en episodio, se resuelve.
+        # Caducar ANTES de emparejar: si la pista lleva TRACK_TTL_S sin verse,
+        # la persona que aparece ahora no es "la misma de antes" aunque su caja
+        # solape. Se resuelve el episodio y la detección abre pista nueva.
         alive: list[_Track] = []
         for track in cam.tracks:
             if now - track.last_seen < TRACK_TTL_S:
@@ -109,6 +116,9 @@ class FallEngine:
             elif track.state == "reported":
                 events.append(self._resolved(camera, track, now))
         cam.tracks = alive
+
+        for track, det in self._match(cam.tracks, persons):
+            events += self._update_track(camera, track, det, now, len(persons))
         return events
 
     # --- emparejamiento -------------------------------------------------
@@ -146,42 +156,48 @@ class FallEngine:
     def _update_track(
         self, camera: Camera, track: _Track, det: Detection, now: float, person_count: int
     ) -> list[Event]:
+        # Tiempo observado desde la muestra anterior (0 en una pista nueva).
+        step = 0.0 if track.last_seen < 0 else min(now - track.last_seen, MAX_STEP_S)
         track.bbox = det.bbox
         track.last_seen = now
         h = max(0, det.bbox[3] - det.bbox[1])
         track.history.append((now, reference_y(det.keypoints, det.bbox), float(h)))
         track.history = [s for s in track.history if s[0] >= now - HISTORY_S]
 
-        floor_time = 0.0 if track.floor_since is None else now - track.floor_since
-        signals = compute_signals(det.keypoints, det.bbox, track.history, now, floor_time)
+        signals = compute_signals(det.keypoints, det.bbox, track.history, now, track.floor_time)
 
-        if is_horizontal(signals):
-            if track.floor_since is None:
-                track.floor_since = now
-            track.upright_since = None
+        # El frame de la transición arranca el contador en 0; a partir de ahí
+        # cada muestra suma lo que se ha visto realmente.
+        horizontal = is_horizontal(signals)
+        if horizontal:
+            track.floor_time = track.floor_time + step if track.posture == "floor" else 0.0
+            track.upright_time = 0.0
+            track.posture = "floor"
+        elif is_upright(signals):
+            track.upright_time = track.upright_time + step if track.posture == "upright" else 0.0
+            track.floor_time = 0.0
+            track.posture = "upright"
         else:
-            track.floor_since = None
-            if is_upright(signals):
-                if track.upright_since is None:
-                    track.upright_since = now
-            else:
-                track.upright_since = None
-        if track.state == "upright" and track.floor_since is None:
+            track.floor_time = 0.0
+            track.upright_time = 0.0
+            track.posture = "other"
+
+        if track.state == "upright" and not horizontal:
             track.peak_drop = None
         elif signals.drop_speed is not None:
             track.peak_drop = max(track.peak_drop or 0.0, signals.drop_speed)
 
-        # Recalcular con el floor_since recién fijado (primer frame tumbado = 0 s)
-        # y con el pico de bajada en lugar del valor instantáneo.
-        floor_time = 0.0 if track.floor_since is None else now - track.floor_since
+        # Rehacer las señales con el tiempo en el suelo recién acumulado y con
+        # el pico de bajada en lugar del valor instantáneo.
         signals = Signals(
             signals.torso_angle, signals.bbox_ratio, track.peak_drop,
-            floor_time, signals.head_low, signals.keypoint_conf,
+            track.floor_time, signals.head_low, signals.keypoint_conf,
         )
-        upright_for = 0.0 if track.upright_since is None else now - track.upright_since
+        floor_time = track.floor_time
+        upright_for = track.upright_time
 
         if track.state == "upright":
-            if track.floor_since is not None:
+            if horizontal:
                 track.state = "candidate"
             return []
 
@@ -191,7 +207,7 @@ class FallEngine:
                 track.peak_drop = None
                 return []
             current = score(signals)
-            confirmed = track.floor_since is not None and floor_time >= CONFIRM_FLOOR_S
+            confirmed = horizontal and floor_time >= CONFIRM_FLOOR_S
             if confirmed and current >= self._min_score:
                 track.state = "reported"
                 track.episode_id = f"{camera.id}-{int(self._clock().timestamp())}"
