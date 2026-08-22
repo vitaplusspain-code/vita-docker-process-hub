@@ -5,11 +5,15 @@
        └──de pie 2 s────────┘         de pie 2 s, o pista perdida 3 s ────┘ → fall_resolved
 
 Una pista es una persona seguida entre frames por solapamiento de cajas
-(IoU). Todo el estado es en memoria; un reinicio del hub a mitad de episodio
+(IoU) y, cuando no hay solape, por cercanía de centros (una caída hacia
+delante mueve la caja entera). Las pistas caducan antes de emparejar: quien
+reaparece tras un hueco largo abre pista nueva, no hereda la anterior.
+Todo el estado es en memoria; un reinicio del hub a mitad de episodio
 pierde el fall_resolved (igual que el ConnectionMonitor, ver docs/backlog.md).
 """
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -27,6 +31,12 @@ from vitahub.models import Camera, Detection, Event
 
 # Solapamiento mínimo para decir "es la misma persona que en el frame anterior".
 IOU_MATCH = 0.3
+# Respaldo cuando no hay solape: distancia entre centros normalizada por el
+# lado mayor de las dos cajas. Una caída hacia delante desplaza la caja hasta
+# una altura de cuerpo, y a 2 fps eso puede dejar IoU = 0 entre frames
+# consecutivos. Puede cruzar personas en escenas concurridas: el tracker real
+# está en el backlog.
+CENTER_MATCH = 1.0
 # Una pista sin observación durante este tiempo se da por perdida.
 TRACK_TTL_S = 3.0
 # Historial de alturas que se conserva por pista (cubre la ventana de drop_speed).
@@ -58,6 +68,16 @@ def _iou(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
     area_b = max(0, b[2] - b[0]) * max(0, b[3] - b[1])
     union = area_a + area_b - inter
     return inter / union if union > 0 else 0.0
+
+
+def _center_distance(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
+    """Distancia entre centros normalizada por el lado mayor de ambas cajas."""
+    ax, ay = (a[0] + a[2]) / 2.0, (a[1] + a[3]) / 2.0
+    bx, by = (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0
+    scale = max(a[2] - a[0], a[3] - a[1], b[2] - b[0], b[3] - b[1])
+    if scale <= 0:
+        return float("inf")
+    return math.hypot(ax - bx, ay - by) / scale
 
 
 @dataclass
@@ -126,7 +146,7 @@ class FallEngine:
     def _match(
         self, tracks: list[_Track], persons: list[Detection]
     ) -> list[tuple[_Track, Detection]]:
-        """Greedy por mayor IoU; las detecciones sin pista abren una nueva."""
+        """Greedy por mayor IoU, luego por cercanía de centros; el resto abre pista nueva."""
         pairs = sorted(
             (
                 (_iou(t.bbox, d.bbox), ti, di)
@@ -144,6 +164,25 @@ class FallEngine:
             used_t.add(ti)
             used_d.add(di)
             result.append((tracks[ti], persons[di]))
+
+        # Segunda pasada: pistas y detecciones aún sueltas, por cercanía de
+        # centros (menor distancia primero). Rescata la caída sin solape.
+        near = sorted(
+            (
+                (_center_distance(t.bbox, d.bbox), ti, di)
+                for ti, t in enumerate(tracks)
+                if ti not in used_t
+                for di, d in enumerate(persons)
+                if di not in used_d
+            ),
+        )
+        for dist, ti, di in near:
+            if dist > CENTER_MATCH or ti in used_t or di in used_d:
+                continue
+            used_t.add(ti)
+            used_d.add(di)
+            result.append((tracks[ti], persons[di]))
+
         for di, d in enumerate(persons):
             if di not in used_d:
                 track = _Track(bbox=d.bbox, last_seen=-1.0)

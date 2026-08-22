@@ -204,3 +204,15 @@ def test_gap_then_reappear_resolves_and_starts_new_track():
     assert late[0].payload["episode_id"] == events[0].payload["episode_id"]
     clock.advance(0.5)
     assert eng.observe(CAM, [lying()], 9.0) == []  # pista nueva: sigue en candidate
+
+
+def test_forward_fall_without_box_overlap_keeps_track():
+    # Caída hacia delante: la caja tumbada no solapa con la de pie (IoU = 0),
+    # pero los centros están a ~87 px (≤ 120 = lado mayor) → misma pista.
+    eng, clock = _engine()
+    away = Detection("person", 0.9, (80, 60, 180, 130),
+                     _pose(nose=(90, 115), shoulders=(100, 115), hips=(150, 115)))
+    events = _feed(eng, clock, [[standing()]] * 2 + [[away]] * 6)
+    assert [e.type for e in events] == ["fall_detected"]
+    assert events[0].payload["signals"]["drop_speed"] is not None
+    assert events[0].payload["score"] >= 0.7
