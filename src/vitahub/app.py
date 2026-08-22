@@ -10,6 +10,7 @@ from pathlib import Path
 
 from vitahub.analytics.connection_monitor import ConnectionMonitor
 from vitahub.analytics.event_engine import EventEngine
+from vitahub.analytics.fall_engine import FallEngine
 from vitahub.config import ConfigError, load_config
 from vitahub.control import admin_port, start_control_server
 from vitahub.discovery.onvif import discover
@@ -29,6 +30,7 @@ from vitahub.worker import process_frame
 
 _log = get_logger("app")
 _HEARTBEAT_FILE = Path("/data/heartbeat")
+_DEFAULT_POSE_WEIGHTS = "/app/models/yolo11n-pose.pt"
 
 # Plazo global (no por cámara, y cubre también la espera por el lock interno
 # del supervisor, no solo los joins) para que stop_all() no exceda el
@@ -59,14 +61,23 @@ def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
     # docs/backlog.md.)
     _touch_heartbeat()
 
+    if cfg.inference.detector == "person_pose":
+        weights_path = env.get("VITAHUB_POSE_WEIGHTS", _DEFAULT_POSE_WEIGHTS)
     detector = build_detector(cfg.inference, weights_path)
     engine = EventEngine(cfg.hub_id)
+    fall_engine = (
+        FallEngine(cfg.hub_id, min_score=cfg.inference.fall.min_score)
+        if cfg.inference.fall.enabled
+        else None
+    )
+    if fall_engine is not None:
+        _log.info("analítica de caídas activada (min_score=%.2f)", cfg.inference.fall.min_score)
     monitor = ConnectionMonitor(cfg.hub_id)
     sink = build_sink(cfg)
 
     def worker(camera: Camera, rtsp_url: str, cam_stop: threading.Event) -> None:
         _camera_loop(  # type: ignore[no-untyped-call]
-            camera, rtsp_url, detector, engine, sink, cfg, cam_stop, monitor
+            camera, rtsp_url, detector, engine, sink, cfg, cam_stop, monitor, fall_engine
         )
 
     supervisor = CameraSupervisor(worker)
@@ -161,7 +172,9 @@ def _emit_all(sink: EventSink, events: list[Event]) -> None:
             _log.exception("no se pudo emitir un evento")
 
 
-def _camera_loop(camera, rtsp_url, detector, engine, sink, cfg, stop, monitor):  # type: ignore[no-untyped-def]
+def _camera_loop(  # type: ignore[no-untyped-def]
+    camera, rtsp_url, detector, engine, sink, cfg, stop, monitor, fall_engine=None
+):
     attempt = 0
     while not stop.is_set():
         cap = None
@@ -196,7 +209,9 @@ def _camera_loop(camera, rtsp_url, detector, engine, sink, cfg, stop, monitor): 
                 if should_sample(last_sample, now, cfg.inference.sample_fps):
                     last_sample = now
                     try:
-                        process_frame(camera, frame, detector, engine, sink, now)
+                        process_frame(
+                            camera, frame, detector, engine, sink, now, fall_engine=fall_engine
+                        )
                     except Exception:  # noqa: BLE001 — un frame malo no tumba el worker
                         _log.exception("cam %s error procesando frame", camera.id)
             _log.info("cam %s desconectada", camera.id)

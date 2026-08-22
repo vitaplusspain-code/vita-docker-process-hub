@@ -15,10 +15,12 @@ COPY scripts ./scripts
 # Embebe los pesos del modelo (arranca sin internet). Falla el build si no se
 # pueden descargar/colocar los pesos: mejor un build roto que una imagen que
 # arranca sin modelo.
-RUN python scripts/download_model.py /app/models/yolo11n.pt
+RUN python scripts/download_model.py /app/models/yolo11n.pt \
+ && python scripts/download_model.py /app/models/yolo11n-pose.pt
 
 ENV VITAHUB_CONFIG=/data/hub.yaml \
     VITAHUB_WEIGHTS=/app/models/yolo11n.pt \
+    VITAHUB_POSE_WEIGHTS=/app/models/yolo11n-pose.pt \
     PYTHONUNBUFFERED=1
 
 # start-period cubre el peor caso de arranque: cargar YOLO más un
