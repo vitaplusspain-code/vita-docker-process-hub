@@ -4,6 +4,7 @@ from pathlib import Path
 
 from vitahub.config import ConfigError, HubConfig, InferenceConfig
 from vitahub.inference.base import Detector
+from vitahub.inference.person_pose_yolo import PosePersonDetector
 from vitahub.inference.person_yolo import PersonDetector
 from vitahub.inference.stub import StubDetector
 from vitahub.logging_setup import get_logger
@@ -15,11 +16,27 @@ from vitahub.sinks.stdout_json import StdoutJsonSink
 _log = get_logger("factory")
 
 
+def _require_weights(weights_path: str) -> None:
+    # Si el fichero no existe, Ultralytics intenta descargarlo al directorio
+    # padre de esa ruta — que puede ser de solo lectura (/app/models en el
+    # contenedor) — y revienta con un traceback confuso. Mejor decir qué falta.
+    if not Path(weights_path).is_file():
+        raise ConfigError(
+            f"pesos del modelo no encontrados en {weights_path} — en el contenedor los "
+            "embebe el Dockerfile; en local, descárgalos con "
+            f"'python scripts/download_model.py {weights_path}' o usa detector: stub"
+        )
+
+
 def build_detector(cfg: InferenceConfig, weights_path: str) -> Detector:
     if cfg.detector == "stub":
         return StubDetector()
     if cfg.detector == "person_yolo":
+        _require_weights(weights_path)
         return PersonDetector.from_weights(weights_path, confidence=cfg.confidence)
+    if cfg.detector == "person_pose":
+        _require_weights(weights_path)
+        return PosePersonDetector.from_weights(weights_path, confidence=cfg.confidence)
     raise ValueError(f"Detector desconocido: {cfg.detector}")
 
 

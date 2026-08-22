@@ -11,6 +11,8 @@ from vitahub.config import (
     UplinkConfig,
 )
 from vitahub.factory import build_detector, build_sink
+from vitahub.inference.person_pose_yolo import PosePersonDetector
+from vitahub.inference.person_yolo import PersonDetector
 from vitahub.inference.stub import StubDetector
 from vitahub.sinks.aws_iot import AwsIotSink
 from vitahub.sinks.fanout import FanoutSink
@@ -113,3 +115,44 @@ def test_build_sink_uses_the_contract_topic(monkeypatch):
     )
     aws = next(s for s in sink._sinks if isinstance(s, AwsIotSink))
     assert aws._topic == "vita/hub/hub-casa-lopez/events"
+
+
+def test_missing_weights_raises_config_error_for_person_yolo(tmp_path):
+    missing = tmp_path / "nope.pt"
+    with pytest.raises(ConfigError, match=str(missing)):
+        build_detector(InferenceConfig(detector="person_yolo"), weights_path=str(missing))
+
+
+def test_missing_weights_raises_config_error_for_person_pose(tmp_path):
+    missing = tmp_path / "nope-pose.pt"
+    with pytest.raises(ConfigError, match=str(missing)):
+        build_detector(InferenceConfig(detector="person_pose"), weights_path=str(missing))
+
+
+def test_build_person_pose_uses_from_weights(tmp_path, monkeypatch):
+    weights = tmp_path / "yolo11n-pose.pt"
+    weights.write_bytes(b"fake")
+    calls = {}
+
+    def _fake_from_weights(path, confidence):
+        calls["path"], calls["confidence"] = path, confidence
+        return PosePersonDetector(model=lambda f, verbose=False: [], confidence=confidence)
+
+    monkeypatch.setattr(PosePersonDetector, "from_weights", staticmethod(_fake_from_weights))
+    det = build_detector(
+        InferenceConfig(detector="person_pose", confidence=0.6), weights_path=str(weights)
+    )
+    assert isinstance(det, PosePersonDetector)
+    assert calls == {"path": str(weights), "confidence": 0.6}
+
+
+def test_build_person_yolo_uses_from_weights(tmp_path, monkeypatch):
+    weights = tmp_path / "yolo11n.pt"
+    weights.write_bytes(b"fake")
+    monkeypatch.setattr(
+        PersonDetector,
+        "from_weights",
+        staticmethod(lambda path, confidence: PersonDetector(model=lambda f, verbose=False: [])),
+    )
+    det = build_detector(InferenceConfig(detector="person_yolo"), weights_path=str(weights))
+    assert isinstance(det, PersonDetector)
