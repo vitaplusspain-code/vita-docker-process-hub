@@ -107,6 +107,9 @@ class _Track:
 @dataclass
 class _CameraState:
     tracks: list[_Track] = field(default_factory=list)
+    # Episodios confirmados en esta cámara: desempata los episode_id de dos
+    # caídas que se confirman en el mismo segundo de reloj.
+    episodes: int = 0
 
 
 class FallEngine:
@@ -138,7 +141,7 @@ class FallEngine:
         cam.tracks = alive
 
         for track, det in self._match(cam.tracks, persons):
-            events += self._update_track(camera, track, det, now, len(persons))
+            events += self._update_track(camera, cam, track, det, now, len(persons))
         return events
 
     # --- emparejamiento -------------------------------------------------
@@ -193,7 +196,13 @@ class FallEngine:
     # --- estado por pista -----------------------------------------------
 
     def _update_track(
-        self, camera: Camera, track: _Track, det: Detection, now: float, person_count: int
+        self,
+        camera: Camera,
+        cam: _CameraState,
+        track: _Track,
+        det: Detection,
+        now: float,
+        person_count: int,
     ) -> list[Event]:
         # Tiempo observado desde la muestra anterior (0 en una pista nueva).
         step = 0.0 if track.last_seen < 0 else min(now - track.last_seen, MAX_STEP_S)
@@ -248,8 +257,9 @@ class FallEngine:
             current = score(signals)
             confirmed = horizontal and floor_time >= CONFIRM_FLOOR_S
             if confirmed and current >= self._min_score:
+                cam.episodes += 1
                 track.state = "reported"
-                track.episode_id = f"{camera.id}-{int(self._clock().timestamp())}"
+                track.episode_id = f"{camera.id}-{int(self._clock().timestamp())}-{cam.episodes}"
                 track.episode_start = now
                 track.last_event_at = now
                 track.max_score = current
@@ -258,16 +268,17 @@ class FallEngine:
                 ]
             return []
 
-        # reported
+        # reported: el score se recalcula cada frame (max_score es el pico real
+        # del episodio); la cadencia de 10 s solo gobierna la emisión.
+        current = score(signals)
+        track.max_score = max(track.max_score, current)
         if upright_for >= CONFIRM_UPRIGHT_S:
             ev = self._resolved(camera, track, now)
             track.state = "upright"
             track.peak_drop = None
             return [ev]
         if now - track.last_event_at >= UPDATE_EVERY_S:
-            current = score(signals)
             track.last_event_at = now
-            track.max_score = max(track.max_score, current)
             return [self._fall_event(camera, track, "fall_update", current, signals, person_count)]
         return []
 

@@ -216,3 +216,25 @@ def test_forward_fall_without_box_overlap_keeps_track():
     assert [e.type for e in events] == ["fall_detected"]
     assert events[0].payload["signals"]["drop_speed"] is not None
     assert events[0].payload["score"] >= 0.7
+
+
+def test_resolved_max_score_is_episode_peak():
+    # El score sube mientras sigue en el suelo (permanencia) aunque no toque
+    # emitir fall_update: max_score debe recoger ese pico, no el del detected.
+    eng, clock = _engine()
+    seq = [[standing()]] * 2 + [[lying()]] * 14 + [[standing()]] * 5
+    events = _feed(eng, clock, seq)
+    assert [e.type for e in events] == ["fall_detected", "fall_resolved"]
+    assert events[0].payload["score"] == 0.75
+    assert events[1].payload["max_score"] == 0.9
+
+
+def test_two_falls_get_distinct_episode_ids():
+    # Dos personas cuyas cajas se solapan al caer, en el mismo segundo: los
+    # episodios deben distinguirse aunque compartan cámara e instante.
+    eng, clock = _engine()
+    seq = [[standing(50), standing(110)]] * 2 + [[lying(50), lying(110)]] * 6
+    events = _feed(eng, clock, seq)
+    assert [e.type for e in events] == ["fall_detected", "fall_detected"]
+    assert events[0].payload["episode_id"] != events[1].payload["episode_id"]
+    assert all(e.payload["person_count"] == 2 for e in events)
