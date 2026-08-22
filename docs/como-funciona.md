@@ -220,7 +220,11 @@ Una línea JSON por evento en stdout:
 Opcional (`inference.fall.enabled`, requiere `detector: person_pose`). `PosePersonDetector` envuelve
 `yolo11n-pose` y devuelve, además de la caja de cada persona, sus 17 keypoints COCO. `FallEngine`
 recibe esas detecciones junto a las de presencia (mismo frame, mismo modelo) y por cada persona
-mantiene una **pista** (emparejada entre frames por IoU) con su propia máquina de estados:
+mantiene una **pista** con su propia máquina de estados. La pista se empareja entre frames por IoU
+(umbral 0.3) y, si no hay solape, por cercanía de centros normalizada por el lado mayor de las dos
+cajas (≤ 1.0): una caída hacia delante mueve la caja entera y a 2 fps puede dejar IoU = 0. Las
+pistas caducan (3 s sin verse) **antes** de emparejar, así que quien reaparece tras un hueco largo
+abre pista nueva en lugar de heredar la anterior:
 
 ```
 upright ──tumbado──► candidate ──score ≥ min y ≥ 2 s en el suelo──► reported
@@ -230,8 +234,9 @@ upright ──tumbado──► candidate ──score ≥ min y ≥ 2 s en el sue
 
 En `candidate` se recalcula el score cada frame sin emitir nada — agacharse y levantarse pasa por
 aquí y vuelve a `upright` sin ruido. La entrada en `reported` emite **un** `fall_detected` por
-episodio; mientras sigue en el suelo, cada 10 s desde el último evento se emite `fall_update`; al
-salir (se levanta 2 s, o la pista desaparece 3 s) se emite `fall_resolved`.
+episodio; mientras sigue en el suelo, el score se recalcula cada frame (de ahí sale el `max_score`
+del episodio) pero solo se emite `fall_update` cada 10 s desde el último evento; al salir (se
+levanta 2 s, o la pista desaparece 3 s) se emite `fall_resolved`.
 
 ### Señales por persona
 
@@ -244,7 +249,7 @@ renormaliza).
 | `torso_angle` (grados) | Ángulo del vector (medio de hombros → medio de caderas) respecto a la vertical. 0° = de pie, 90° = horizontal. | Cuerpo tumbado |
 | `bbox_ratio` | Ancho / alto de la caja | Redundante con el anterior; útil si faltan keypoints |
 | `drop_speed` (alturas de caja / s) | Velocidad de descenso del medio de caderas (centro de la caja si faltan), normalizada por la altura de la caja, máxima en una ventana de 1.5 s. El engine **conserva el pico** desde que la persona dejó de estar de pie: el `fall_detected` sale ≥ 2 s después de la caída, fuera de la ventana, y sin ese pico la brusquedad nunca contaría | Transición brusca (caída) frente a lenta (tumbarse) |
-| `floor_time_s` | Segundos consecutivos con `torso_angle ≥ 60°` (o, sin keypoints, `bbox_ratio ≥ 1.2`) | Sigue en el suelo |
+| `floor_time_s` | Segundos **observados** con `torso_angle ≥ 60°` (o, sin keypoints, `bbox_ratio ≥ 1.2`): suma de los pasos entre muestras, con tope de 1 s por muestra (`MAX_STEP_S`). No es tiempo de reloj: un hueco de muestreo no confirma la caída | Sigue en el suelo |
 | `head_low` (bool) | Nariz por debajo del medio de caderas, o nariz en el tercio inferior de la caja | Refuerzo de "tumbado" |
 | `keypoint_conf` | Media de confianza de los keypoints usados (hombros, caderas, nariz) | Calidad de la pose; se reporta, no puntúa |
 
@@ -272,7 +277,7 @@ Mismo envelope de siempre, tipos nuevos:
 {"schema_version":1,"hub_id":"hub-x","camera_id":"onvif-123","camera_name":"salon",
  "type":"fall_detected","severity":"high","timestamp":"2026-08-22T10:15:02+00:00",
  "payload":{
-   "episode_id":"onvif-123-1724321702",
+   "episode_id":"onvif-123-1724321702-1",
    "score":0.82,
    "signals":{"torso_angle":74.1,"bbox_ratio":1.9,"drop_speed":0.85,
               "floor_time_s":2.5,"head_low":true,"keypoint_conf":0.61},
@@ -286,8 +291,9 @@ Mismo envelope de siempre, tipos nuevos:
 | `fall_update` | `high` | Igual que `fall_detected`, recalculado |
 | `fall_resolved` | `info` | `episode_id`, `duration_s`, `max_score` |
 
-`episode_id` = `<camera_id>-<epoch de inicio del episodio>`: enlaza los tres eventos en AWS sin que
-el consumidor guarde estado. **El hub no notifica a nadie** — solo produce el dato; decidir a quién
+`episode_id` = `<camera_id>-<epoch de inicio del episodio>-<n>`, donde `n` cuenta los episodios de
+esa cámara desde el arranque (dos caídas confirmadas en el mismo segundo no comparten id): enlaza
+los tres eventos en AWS sin que el consumidor guarde estado. **El hub no notifica a nadie** — solo produce el dato; decidir a quién
 y cuándo avisar es un sistema futuro en AWS.
 
 ## Separación stdout / stderr

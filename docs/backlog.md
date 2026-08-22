@@ -206,6 +206,17 @@ integración del slice.
   del `ConnectionMonitor` de arriba).
 - Medir coste de `yolo11n-pose` en Orin con 4 cámaras; ajustar `--start-period` si la carga del
   modelo de pose lo requiere.
+- El respaldo por centroide (`CENTER_MATCH = 1.0`) puede cruzar dos personas cercanas en escenas
+  concurridas: refuerza el item "tracker real" de arriba.
+- Spec: el umbral de "de pie" sin keypoints comparte el 1.2 con "tumbado" (`bbox_ratio`), sin
+  histéresis; con pose sí hay hueco (60° / 45°). Decidir p. ej. 1.2 / 0.9.
+- Spec: qué significa `drop_speed` cuando la pista nace ya en el suelo (hoy sale 0 y el término
+  cuenta como "no brusco", indistinguible de tumbarse despacio).
+- `scripts/replay_video.py` reproduce a cadencia perfecta: añadir `--drop-frames` para simular
+  huecos de muestreo antes de calibrar con vídeos reales.
+- `FallEngine._cameras` no olvida las cámaras dadas de baja (mismo caso que `EventEngine`).
+- `scripts/download_model.py` deriva el nombre del modelo del fichero destino: con un nombre
+  personalizado no resuelve. Mencionarlo en el mensaje de `_require_weights` o en el docstring.
 
 ## Verificación pendiente en hardware real
 Las partes de red (descubrimiento ONVIF, captura RTSP) no corren en CI por diseño. Validar

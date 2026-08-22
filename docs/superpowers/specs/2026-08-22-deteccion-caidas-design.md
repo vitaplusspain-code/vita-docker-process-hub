@@ -90,8 +90,13 @@ sale de las mismas cajas que devuelve el modelo de pose.
 ### 4.1 Asociación de personas entre frames
 
 Emparejamiento por IoU entre las cajas del frame anterior y las del actual (asignación greedy por
-mayor IoU, umbral 0.3). Sin match → pista nueva. Una pista sin observación durante 3 s se descarta
-(y si estaba en episodio, el episodio se resuelve — ver 4.4).
+mayor IoU, umbral 0.3). Segunda pasada de respaldo sobre lo que queda suelto: distancia entre
+centros normalizada por el lado mayor de las dos cajas, umbral `CENTER_MATCH = 1.0` — una caída
+hacia delante desplaza la caja hasta una altura de cuerpo y a 2 fps puede dejar IoU = 0 entre
+frames consecutivos. Sin match → pista nueva. Una pista sin observación durante 3 s se descarta (y
+si estaba en episodio, el episodio se resuelve — ver 4.4); **la caducidad se aplica antes de
+emparejar**, de modo que quien reaparece tras un hueco largo no hereda la pista aunque su caja
+solape.
 
 ### 4.2 Señales por persona
 
@@ -103,7 +108,7 @@ puntos necesarios, la señal vale `None` y su término del score pesa 0 (el rest
 | `torso_angle` (grados) | Ángulo del vector (medio de hombros → medio de caderas) respecto a la vertical. 0° = de pie, 90° = horizontal. | Cuerpo tumbado |
 | `bbox_ratio` | Ancho / alto de la caja | Redundante con el anterior; útil si faltan keypoints |
 | `drop_speed` (alturas de caja / s) | Velocidad de descenso del medio de caderas (centro de la caja si faltan), normalizada por la altura de la caja, máxima en una ventana de 1.5 s. El engine **conserva el pico** desde que la persona dejó de estar de pie: el `fall_detected` sale ≥ 2 s después de la caída, fuera de la ventana, y sin ese pico la brusquedad nunca contaría | Transición brusca (caída) frente a lenta (tumbarse) |
-| `floor_time_s` | Segundos consecutivos con `torso_angle ≥ 60°` (o, sin keypoints, `bbox_ratio ≥ 1.2`) | Sigue en el suelo |
+| `floor_time_s` | Segundos **observados** con `torso_angle ≥ 60°` (o, sin keypoints, `bbox_ratio ≥ 1.2`): suma de los pasos entre muestras consecutivas, cada uno con tope `MAX_STEP_S = 1.0` s. No es tiempo de reloj: un hueco de muestreo no confirma una caída por sí solo | Sigue en el suelo |
 | `head_low` (bool) | Nariz por debajo del medio de caderas, o nariz en el tercio inferior de la caja | Refuerzo de "tumbado" |
 | `keypoint_conf` | Media de confianza de los keypoints usados (hombros, caderas, nariz) | Calidad de la pose; se reporta, no puntúa |
 
@@ -135,9 +140,10 @@ upright ──torso_angle ≥ 60°──► candidate ──score ≥ min_score 
   aquí y vuelve a `upright` sin ruido.
 - Entrada en `reported`: se emite **un** `fall_detected` por episodio. La condición de 2 s en el
   suelo evita disparar por un frame ruidoso.
-- En `reported`: cada 10 s desde el último evento del episodio se emite `fall_update` con el score
-  recalculado (nunca antes de 10 s, aunque el score suba). Así AWS ve "lleva 40 s en el suelo" sin
-  inundar el topic.
+- En `reported`: el score se recalcula **cada frame** y alimenta el `max_score` del episodio; la
+  cadencia solo gobierna la emisión: cada 10 s desde el último evento se emite `fall_update` con el
+  score recalculado (nunca antes de 10 s, aunque el score suba). Así AWS ve "lleva 40 s en el suelo"
+  sin inundar el topic.
 - Salida de `reported` (se levanta 2 s, o la pista desaparece): `fall_resolved` con duración y
   score máximo del episodio.
 
@@ -155,7 +161,7 @@ Mismo envelope `Event`, `schema_version` sigue en 1: se añaden tipos, no cambia
 {"schema_version":1,"hub_id":"hub-x","camera_id":"onvif-123","camera_name":"salon",
  "type":"fall_detected","severity":"high","timestamp":"2026-08-22T10:15:02+00:00",
  "payload":{
-   "episode_id":"onvif-123-1724321702",
+   "episode_id":"onvif-123-1724321702-1",
    "score":0.82,
    "signals":{"torso_angle":74.1,"bbox_ratio":1.9,"drop_speed":0.85,
               "floor_time_s":2.5,"head_low":true,"keypoint_conf":0.61},
@@ -169,8 +175,9 @@ Mismo envelope `Event`, `schema_version` sigue en 1: se añaden tipos, no cambia
 | `fall_update` | `high` | Igual que `fall_detected`, recalculado |
 | `fall_resolved` | `info` | `episode_id`, `duration_s`, `max_score` |
 
-- `episode_id` = `<camera_id>-<epoch de inicio del episodio>`. Enlaza los tres eventos en AWS sin
-  que el consumidor guarde estado.
+- `episode_id` = `<camera_id>-<epoch de inicio del episodio>-<n>`, con `n` = contador de episodios
+  de esa cámara desde el arranque (dos caídas confirmadas en el mismo segundo no pueden compartir
+  identificador). Enlaza los tres eventos en AWS sin que el consumidor guarde estado.
 - Señales `None` se serializan como `null`; `score` y señales numéricas con 3 decimales.
 - `person_count` es el del frame en que se emite: permite saber si había alguien más en la
   habitación.
