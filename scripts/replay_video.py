@@ -44,7 +44,11 @@ class _FilteredSink(EventSink):
 
 
 def summarize(events: list[Event], frames: int) -> dict[str, object]:
-    scores = [float(e.payload["score"]) for e in events if "score" in e.payload]  # type: ignore[arg-type]
+    scores = [
+        float(e.payload["score"])  # type: ignore[arg-type]
+        for e in events
+        if "score" in e.payload
+    ]
     return {
         "frames": frames,
         "events": dict(Counter(e.type for e in events)),
@@ -52,7 +56,9 @@ def summarize(events: list[Event], frames: int) -> dict[str, object]:
     }
 
 
-def replay(path: str, weights: str, fps: float, min_score: float, presence: bool) -> dict[str, object]:
+def replay(
+    path: str, weights: str, fps: float, min_score: float, presence: bool
+) -> dict[str, object]:
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise SystemExit(f"no se puede abrir {path}")

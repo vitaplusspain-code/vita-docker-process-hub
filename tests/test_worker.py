@@ -1,3 +1,4 @@
+import vitahub.worker as worker_module
 from vitahub.analytics.event_engine import EventEngine
 from vitahub.analytics.fall_engine import FallEngine
 from vitahub.inference.stub import StubDetector
@@ -74,11 +75,14 @@ def test_process_frame_emits_presence_and_fall_through_same_sink():
     assert sink.events == all_events
 
 
-def test_fall_engine_exception_does_not_break_presence(caplog):
+def test_fall_engine_exception_does_not_break_presence(caplog, monkeypatch):
     class _Boom:
         def observe(self, camera, detections, now):
             raise RuntimeError("boom")
 
+    # El registro de "ya avisado" es global al módulo: se aísla para que el
+    # test no dependa de si otro test ya quemó esta cámara.
+    monkeypatch.setattr(worker_module, "_fall_failure_logged", set())
     engine = EventEngine(hub_id="hub-1", present_after_s=2.0, absent_after_s=5.0)
     sink = _RecordingSink()
     detector = StubDetector(person_count=1)

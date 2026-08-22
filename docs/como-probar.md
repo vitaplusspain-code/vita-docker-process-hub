@@ -20,10 +20,10 @@ pip install -e ".[dev]"
 pytest -v
 ```
 
-Deberías ver **229 tests en verde**. Además, las mismas puertas que corren en CI:
+Deberías ver **234 tests en verde**. Además, las mismas puertas que corren en CI:
 
 ```bash
-ruff check src tests
+ruff check src tests scripts
 mypy
 ```
 
@@ -328,8 +328,8 @@ ni que la regla escriba en DynamoDB. Eso solo se comprueba contra la cuenta real
 
 ## Verificación previa a integrar (checklist)
 
-- [ ] `pytest -v` → 229 verdes.
-- [ ] `ruff check src tests` y `mypy` limpios.
+- [ ] `pytest -v` → 234 verdes.
+- [ ] `ruff check src tests scripts` y `mypy` limpios.
 - [ ] Arranque en seco (`stub`): descubre o avisa de 0 cámaras, sin caerse.
 - [ ] Extremo a extremo con cámara real: `person_detected` al entrar y `person_absent` al salir.
 - [ ] Conectar una cámara con el hub ya corriendo: aparece sola en ≤60 s (o al instante con `POST /rescan`), sin reiniciar el contenedor.
