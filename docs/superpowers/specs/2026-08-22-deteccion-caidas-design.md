@@ -102,7 +102,7 @@ puntos necesarios, la señal vale `None` y su término del score pesa 0 (el rest
 |---|---|---|
 | `torso_angle` (grados) | Ángulo del vector (medio de hombros → medio de caderas) respecto a la vertical. 0° = de pie, 90° = horizontal. | Cuerpo tumbado |
 | `bbox_ratio` | Ancho / alto de la caja | Redundante con el anterior; útil si faltan keypoints |
-| `drop_speed` (alturas de caja / s) | Máximo en los últimos 1.5 s de la velocidad de descenso del medio de caderas, normalizada por la altura de la caja en ese momento | Transición brusca (caída) frente a lenta (tumbarse) |
+| `drop_speed` (alturas de caja / s) | Velocidad de descenso del medio de caderas (centro de la caja si faltan), normalizada por la altura de la caja, máxima en una ventana de 1.5 s. El engine **conserva el pico** desde que la persona dejó de estar de pie: el `fall_detected` sale ≥ 2 s después de la caída, fuera de la ventana, y sin ese pico la brusquedad nunca contaría | Transición brusca (caída) frente a lenta (tumbarse) |
 | `floor_time_s` | Segundos consecutivos con `torso_angle ≥ 60°` (o, sin keypoints, `bbox_ratio ≥ 1.2`) | Sigue en el suelo |
 | `head_low` (bool) | Nariz por debajo del medio de caderas, o nariz en el tercio inferior de la caja | Refuerzo de "tumbado" |
 | `keypoint_conf` | Media de confianza de los keypoints usados (hombros, caderas, nariz) | Calidad de la pose; se reporta, no puntúa |
