@@ -236,7 +236,9 @@ En `candidate` se recalcula el score cada frame sin emitir nada — agacharse y 
 aquí y vuelve a `upright` sin ruido. La entrada en `reported` emite **un** `fall_detected` por
 episodio; mientras sigue en el suelo, el score se recalcula cada frame (de ahí sale el `max_score`
 del episodio) pero solo se emite `fall_update` cada 10 s desde el último evento; al salir (se
-levanta 2 s, o la pista desaparece 3 s) se emite `fall_resolved`.
+levanta 2 s, o la pista desaparece 3 s) se emite `fall_resolved`, con `reason` = `upright` o
+`track_lost` según el caso: para quien consume el evento no es lo mismo "se ha levantado" que
+"hemos dejado de verla" (una oclusión de 3 s no debería cerrar una alerta).
 
 ### Señales por persona
 
@@ -289,7 +291,7 @@ Mismo envelope de siempre, tipos nuevos:
 |---|---|---|
 | `fall_detected` | `high` | `episode_id`, `score`, `signals`, `person_count` |
 | `fall_update` | `high` | Igual que `fall_detected`, recalculado |
-| `fall_resolved` | `info` | `episode_id`, `duration_s`, `max_score` |
+| `fall_resolved` | `info` | `episode_id`, `duration_s`, `max_score`, `reason` (`upright` \| `track_lost`) |
 
 `episode_id` = `<camera_id>-<epoch de inicio del episodio>-<n>`, donde `n` cuenta los episodios de
 esa cámara desde el arranque (dos caídas confirmadas en el mismo segundo no comparten id): enlaza

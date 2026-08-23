@@ -17,6 +17,7 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Literal
 
 from vitahub.analytics.fall_signals import (
     Sample,
@@ -51,6 +52,10 @@ UPDATE_EVERY_S = 10.0
 # periodo de muestreo a 2 fps. Un hueco mayor (frames perdidos, worker
 # atascado) no cuenta como tiempo "visto" en el suelo ni de pie.
 MAX_STEP_S = 1.0
+
+# Por que se cierra un episodio: de pie CONFIRM_UPRIGHT_S ("upright") o pista
+# sin observacion TRACK_TTL_S ("track_lost"). Viaja en el payload de fall_resolved.
+ResolvedReason = Literal["upright", "track_lost"]
 
 _SEV_HIGH = "high"
 _SEV_INFO = "info"
@@ -137,7 +142,7 @@ class FallEngine:
             if now - track.last_seen < TRACK_TTL_S:
                 alive.append(track)
             elif track.state == "reported":
-                events.append(self._resolved(camera, track, now))
+                events.append(self._resolved(camera, track, now, "track_lost"))
         cam.tracks = alive
 
         for track, det in self._match(cam.tracks, persons):
@@ -273,7 +278,7 @@ class FallEngine:
         current = score(signals)
         track.max_score = max(track.max_score, current)
         if upright_for >= CONFIRM_UPRIGHT_S:
-            ev = self._resolved(camera, track, now)
+            ev = self._resolved(camera, track, now, "upright")
             track.state = "upright"
             track.peak_drop = None
             return [ev]
@@ -308,7 +313,11 @@ class FallEngine:
             },
         )
 
-    def _resolved(self, camera: Camera, track: _Track, now: float) -> Event:
+    def _resolved(
+        self, camera: Camera, track: _Track, now: float, reason: ResolvedReason
+    ) -> Event:
+        # `reason` distingue "se levanto" de "dejamos de verla": para el motor de
+        # reglas no es lo mismo, una oclusion de 3 s no debe cerrar una alerta.
         return Event(
             hub_id=self._hub_id,
             camera_id=camera.id,
@@ -320,5 +329,6 @@ class FallEngine:
                 "episode_id": track.episode_id,
                 "duration_s": round(now - track.episode_start, 3),
                 "max_score": round(track.max_score, 3),
+                "reason": reason,
             },
         )

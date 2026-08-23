@@ -121,6 +121,7 @@ def test_resolved_when_person_stands_up():
     assert res.payload["episode_id"] == events[0].payload["episode_id"]
     assert res.payload["max_score"] >= events[0].payload["score"]
     assert res.payload["duration_s"] > 0
+    assert res.payload["reason"] == "upright"
 
 
 def test_resolved_when_track_disappears():
@@ -128,6 +129,9 @@ def test_resolved_when_track_disappears():
     seq = [[standing()]] * 2 + [[lying()]] * 6 + [[]] * 7  # 3 s sin verla
     events = _feed(eng, clock, seq)
     assert [e.type for e in events] == ["fall_detected", "fall_resolved"]
+    # Sin verla de pie no hay confirmacion de que se levantara: el consumidor
+    # (motor de reglas) no debe cerrar la alerta por este motivo.
+    assert events[1].payload["reason"] == "track_lost"
 
 
 def test_missing_keypoints_uses_bbox_and_never_raises():
@@ -202,6 +206,7 @@ def test_gap_then_reappear_resolves_and_starts_new_track():
     late = eng.observe(CAM, [lying()], 8.5)
     assert [e.type for e in late] == ["fall_resolved"]
     assert late[0].payload["episode_id"] == events[0].payload["episode_id"]
+    assert late[0].payload["reason"] == "track_lost"
     clock.advance(0.5)
     assert eng.observe(CAM, [lying()], 9.0) == []  # pista nueva: sigue en candidate
 
