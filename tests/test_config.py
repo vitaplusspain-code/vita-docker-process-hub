@@ -396,3 +396,46 @@ def test_fall_section_must_be_mapping(tmp_path):
     path = _write(tmp_path, "hub_id: hub-x\ninference:\n  fall: si\n")
     with pytest.raises(ConfigError, match="inference.fall"):
         load_config(path, ENV)
+
+
+def test_identity_defaults_off(tmp_path):
+    cfg = load_config(_write(tmp_path, "hub_id: hub-1\n"), ENV)
+    assert cfg.inference.identity.enabled is False
+    assert cfg.inference.identity.match_threshold == 0.4
+
+
+def test_identity_requires_fall_enabled(tmp_path):
+    path = _write(
+        tmp_path,
+        "hub_id: hub-1\ninference:\n  detector: person_pose\n  identity:\n    enabled: true\n",
+    )
+    with pytest.raises(ConfigError, match="inference.identity.enabled requiere"):
+        load_config(path, ENV)
+
+
+def test_identity_valid_when_fall_enabled(tmp_path):
+    path = _write(
+        tmp_path,
+        "hub_id: hub-1\ninference:\n  detector: person_pose\n  fall:\n    enabled: true\n  identity:\n    enabled: true\n    match_threshold: 0.5\n",
+    )
+    cfg = load_config(path, ENV)
+    assert cfg.inference.identity.enabled is True
+    assert cfg.inference.identity.match_threshold == 0.5
+
+
+def test_identity_threshold_out_of_range(tmp_path):
+    path = _write(
+        tmp_path,
+        "hub_id: hub-1\ninference:\n  identity:\n    match_threshold: 1.5\n",
+    )
+    with pytest.raises(ConfigError, match="match_threshold"):
+        load_config(path, ENV)
+
+
+def test_identity_threshold_not_numeric(tmp_path):
+    path = _write(
+        tmp_path,
+        "hub_id: hub-1\ninference:\n  identity:\n    match_threshold: alto\n",
+    )
+    with pytest.raises(ConfigError, match="match_threshold"):
+        load_config(path, ENV)

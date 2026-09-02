@@ -39,12 +39,22 @@ class FallConfig:
 
 
 @dataclass
+class IdentityConfig:
+    enabled: bool = False
+    # Similitud coseno mínima contra la galería para etiquetar una pista.
+    # Se calibra con scripts/replay_video.py; el resto de umbrales del
+    # reconocimiento son constantes en identity/face_id.py.
+    match_threshold: float = 0.4
+
+
+@dataclass
 class InferenceConfig:
     detector: str = "person_yolo"
     sample_fps: float = 2.0
     confidence: float = 0.4
     stream: str = "substream"
     fall: FallConfig = field(default_factory=FallConfig)
+    identity: IdentityConfig = field(default_factory=IdentityConfig)
 
 
 @dataclass
@@ -193,6 +203,33 @@ def _fall_from_raw(raw: object, detector: str) -> FallConfig:
     return FallConfig(enabled=enabled, min_score=min_score)
 
 
+def _identity_from_raw(raw: object, fall: FallConfig) -> IdentityConfig:
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ConfigError("Sección 'inference.identity' debe ser un mapping YAML")
+    enabled = bool(raw.get("enabled", False))
+    try:
+        match_threshold = float(raw.get("match_threshold", 0.4))
+    except (ValueError, TypeError) as exc:
+        raise ConfigError(
+            "Campo 'inference.identity.match_threshold' no es numérico"
+        ) from exc
+    if not 0.0 < match_threshold <= 1.0:
+        raise ConfigError(
+            "Campo 'inference.identity.match_threshold' debe estar entre 0 "
+            "(excl.) y 1"
+        )
+    if enabled and not fall.enabled:
+        # En v1 la identidad solo etiqueta eventos fall_*: sin caídas activas
+        # no tiene ningún efecto y encenderla es un error de instalación.
+        raise ConfigError(
+            "inference.identity.enabled requiere 'inference.fall.enabled: true' "
+            "(en esta versión la identidad solo etiqueta eventos de caída)"
+        )
+    return IdentityConfig(enabled=enabled, match_threshold=match_threshold)
+
+
 def load_config(path: Path, env: Mapping[str, str]) -> HubConfig:
     credentials = _credentials_from_env(env)
     try:
@@ -258,6 +295,7 @@ def load_config(path: Path, env: Mapping[str, str]) -> HubConfig:
         )
 
     detector = str(inf_raw.get("detector", "person_yolo"))
+    fall = _fall_from_raw(inf_raw.get("fall"), detector)
     return HubConfig(
         hub_id=hub_id,
         discovery=DiscoveryConfig(interval_seconds=interval_seconds),
@@ -266,7 +304,8 @@ def load_config(path: Path, env: Mapping[str, str]) -> HubConfig:
             sample_fps=sample_fps,
             confidence=confidence,
             stream=stream,
-            fall=_fall_from_raw(inf_raw.get("fall"), detector),
+            fall=fall,
+            identity=_identity_from_raw(inf_raw.get("identity"), fall),
         ),
         cameras=_cameras_from_raw(raw.get("cameras") or []),
         credentials=credentials,
