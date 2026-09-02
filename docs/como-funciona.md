@@ -72,10 +72,14 @@ Dos ideas de diseño que conviene retener:
 | `analytics/event_engine.py` | Máquina de estados anti-parpadeo: detecciones → eventos. |
 | `analytics/connection_monitor.py` | Éxitos y fallos de conexión → eventos `camera_unreachable` / `camera_reachable`. |
 | `analytics/fall_signals.py` | Señales geométricas y score de caída a partir de una pose; funciones puras. |
-| `analytics/fall_engine.py` | `FallEngine`: pistas por persona y máquina de estados de episodio → eventos `fall_*`. |
+| `analytics/tracker.py` | `Tracker`: pistas (`Track`) por persona y cámara, emparejadas entre frames por IoU/cercanía de centros; la identidad viaja colgada de la pista. |
+| `analytics/fall_engine.py` | `FallEngine`: consume pistas del tracker y lleva, por pista, la máquina de estados de episodio → eventos `fall_*`. |
+| `identity/insightface_engine.py` | `InsightFaceEngine`: envoltorio de InsightFace (SCRFD + ArcFace) sobre los pesos embebidos. |
+| `identity/gallery.py` | `load_gallery`: fotos de `/data/faces/<person_id>/` → embedding medio por persona (en memoria). |
+| `identity/face_id.py` | `FaceIdentifier`: busca caras en pistas anónimas y etiqueta con regla de 2 coincidencias sobre `match_threshold`. |
 | `sinks/` | `EventSink` (interfaz), `StdoutJsonSink`, `FanoutSink` (aísla fallos entre sinks) y `AwsIotSink` (MQTT/TLS a AWS IoT Core). |
-| `factory.py` | Construye el `Detector` según la config (`stub` / `person_yolo` / `person_pose`) y el `EventSink` según `uplink.enabled`. |
-| `worker.py` | `process_frame`: detecta, cuenta, alimenta el motor de presencia y, si hay `fall_engine`, el de caídas; emite por el sink. |
+| `factory.py` | Construye el `Detector` según la config (`stub` / `person_yolo` / `person_pose`), el `EventSink` según `uplink.enabled` y el `FaceIdentifier` (`build_face_identifier`) según `inference.identity.enabled`. |
+| `worker.py` | `process_frame`: detecta, cuenta, alimenta el motor de presencia y, si hay `fall_engine` y `tracker`, orquesta pistas + identidad (`identifier`) + caídas; emite por el sink. |
 | `logging_setup.py` | Logs JSON a **stderr** + redacción de secretos. |
 
 ## El flujo, paso a paso
@@ -218,13 +222,16 @@ Una línea JSON por evento en stdout:
 ## Caídas
 
 Opcional (`inference.fall.enabled`, requiere `detector: person_pose`). `PosePersonDetector` envuelve
-`yolo11n-pose` y devuelve, además de la caja de cada persona, sus 17 keypoints COCO. `FallEngine`
-recibe esas detecciones junto a las de presencia (mismo frame, mismo modelo) y por cada persona
-mantiene una **pista** con su propia máquina de estados. La pista se empareja entre frames por IoU
-(umbral 0.3) y, si no hay solape, por cercanía de centros normalizada por el lado mayor de las dos
-cajas (≤ 1.0): una caída hacia delante mueve la caja entera y a 2 fps puede dejar IoU = 0. Las
-pistas caducan (3 s sin verse) **antes** de emparejar, así que quien reaparece tras un hueco largo
-abre pista nueva en lugar de heredar la anterior:
+`yolo11n-pose` y devuelve, además de la caja de cada persona, sus 17 keypoints COCO. El
+**emparejamiento entre frames vive en el `Tracker`** (`analytics/tracker.py`), no en `FallEngine`:
+por cada persona mantiene una **pista** (`Track`), emparejada por IoU (umbral 0.3) y, si no hay
+solape, por cercanía de centros normalizada por el lado mayor de las dos cajas (≤ 1.0) — una caída
+hacia delante mueve la caja entera y a 2 fps puede dejar IoU = 0. Las pistas caducan (3 s sin verse)
+**antes** de emparejar, así que quien reaparece tras un hueco largo abre pista nueva en lugar de
+heredar la anterior; es también la pista la que carga la identidad (ver «Identidad de la persona»
+más abajo), así que sobrevive de una caída a la siguiente mientras no se pierda. `FallEngine`
+consume el `TrackerUpdate` (pistas emparejadas y perdidas) del `Tracker` y lleva, por pista, su
+propia máquina de estados de episodio:
 
 ```
 upright ──tumbado──► candidate ──score ≥ min y ≥ 2 s en el suelo──► reported
@@ -283,20 +290,44 @@ Mismo envelope de siempre, tipos nuevos:
    "score":0.82,
    "signals":{"torso_angle":74.1,"bbox_ratio":1.9,"drop_speed":0.85,
               "floor_time_s":2.5,"head_low":true,"keypoint_conf":0.61},
-   "person_count":1
+   "person_count":1,
+   "person":{"id":"maria","confidence":0.87}
  }}
 ```
 
 | Tipo | Severity | Payload |
 |---|---|---|
-| `fall_detected` | `high` | `episode_id`, `score`, `signals`, `person_count` |
+| `fall_detected` | `high` | `episode_id`, `score`, `signals`, `person_count`, `person` |
 | `fall_update` | `high` | Igual que `fall_detected`, recalculado |
-| `fall_resolved` | `info` | `episode_id`, `duration_s`, `max_score`, `reason` (`upright` \| `track_lost`) |
+| `fall_resolved` | `info` | `episode_id`, `duration_s`, `max_score`, `reason` (`upright` \| `track_lost`), `person` |
 
 `episode_id` = `<camera_id>-<epoch de inicio del episodio>-<n>`, donde `n` cuenta los episodios de
 esa cámara desde el arranque (dos caídas confirmadas en el mismo segundo no comparten id): enlaza
 los tres eventos en AWS sin que el consumidor guarde estado. **El hub no notifica a nadie** — solo produce el dato; decidir a quién
 y cuándo avisar es un sistema futuro en AWS.
+
+### Identidad de la persona
+
+Opcional (`inference.identity.enabled`, requiere `inference.fall.enabled`). El instalador deja 3-5
+fotos de la cara de cada persona en `/data/faces/<person_id>/`; al arrancar, `build_face_identifier`
+calcula un embedding medio por persona con InsightFace (SCRFD + ArcFace), en local. Mientras una
+pista es anónima, el `FaceIdentifier` le busca la cara como mucho una vez por segundo y por cámara
+(una extracción sirve a todas las pistas del frame); dos coincidencias consistentes por encima de
+`match_threshold` etiquetan la pista — la regla de 2 evita que un solo frame ruidoso etiquete de
+más — y la etiqueta viaja colgada del `Track` (ver «Caídas» más arriba) hasta que la pista se pierde
+(3 s sin verse, igual que el resto del tracker). Por eso no hace falta ver la cara durante la caída:
+basta con habérsela visto al entrar o al sentarse.
+
+Los eventos `fall_*` llevan `person: {id, confidence}` o `null` (persona no enrolada, cara nunca
+vista, o identidad apagada). **El hub etiqueta, no filtra**: la caída de una visita se emite igual
+que la de alguien enrolado; decidir por identidad es cosa del consumidor en AWS. Del hogar sale solo
+el alias — ni fotos ni embeddings se emiten, se loguean ni se suben; viven en memoria, solo en el
+hub.
+
+Limitaciones v1: una cara de menos de 40 px no se intenta (persona lejos de cámara, típico con
+`stream: substream`), y una oclusión de más de 3 s hace que la pista vuelva a anónima hasta ver la
+cara otra vez. El umbral se calibra con `scripts/replay_video.py --faces <carpeta>` sobre vídeo
+real, igual que los pesos y umbrales de caída (ver [como-probar.md](como-probar.md)).
 
 ## Separación stdout / stderr
 
@@ -321,6 +352,9 @@ inference:
   fall:
     enabled: false          # true para emitir fall_detected/update/resolved (requiere detector: person_pose)
     min_score: 0.3          # score mínimo para emitir; bajo a propósito, quien filtra es AWS
+  identity:
+    enabled: false          # true para etiquetar los fall_* con la persona (requiere fall.enabled)
+    match_threshold: 0.4    # similitud mínima contra /data/faces/<person_id>/ para etiquetar
 uplink:
   enabled: false             # true para publicar los eventos en AWS IoT Core (ver más abajo)
   topic_prefix: vita/hub
@@ -336,6 +370,8 @@ cameras: []                 # se autopobla al descubrir
 | `VITAHUB_CONFIG` | `/data/hub.yaml` | Ruta del fichero de config. |
 | `VITAHUB_WEIGHTS` | `/app/models/yolo11n.pt` | Pesos YOLO (embebidos en la imagen). |
 | `VITAHUB_POSE_WEIGHTS` | `/app/models/yolo11n-pose.pt` | Pesos de pose (`detector: person_pose`; embebidos en la imagen). |
+| `VITAHUB_FACE_WEIGHTS` | `/app/models/insightface` | Pesos de reconocimiento facial (`inference.identity.enabled`; embebidos en la imagen). |
+| `VITAHUB_FACES_DIR` | `/data/faces` | Carpeta con `<person_id>/` y 3-5 fotos por persona enrolada. |
 | `VITAHUB_LOG_LEVEL` | `INFO` | Nivel de log. |
 | `VITAHUB_ADMIN_TOKEN` | — (vacío = deshabilitado) | Token de `POST /rescan`. Sin él no se abre puerto. |
 | `VITAHUB_ADMIN_PORT` | `8787` | Puerto del endpoint de control. |

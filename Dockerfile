@@ -3,7 +3,7 @@ ARG BASE_IMAGE=python:3.12-slim
 FROM ${BASE_IMAGE} AS base
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1 libglib2.0-0 ffmpeg && rm -rf /var/lib/apt/lists/*
+    libgl1 libglib2.0-0 ffmpeg build-essential && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY pyproject.toml ./
@@ -17,10 +17,12 @@ COPY scripts ./scripts
 # arranca sin modelo.
 RUN python scripts/download_model.py /app/models/yolo11n.pt \
  && python scripts/download_model.py /app/models/yolo11n-pose.pt
+RUN python scripts/download_face_models.py /app/models/insightface
 
 ENV VITAHUB_CONFIG=/data/hub.yaml \
     VITAHUB_WEIGHTS=/app/models/yolo11n.pt \
     VITAHUB_POSE_WEIGHTS=/app/models/yolo11n-pose.pt \
+    VITAHUB_FACE_WEIGHTS=/app/models/insightface \
     PYTHONUNBUFFERED=1
 
 # start-period cubre el peor caso de arranque: cargar YOLO más un

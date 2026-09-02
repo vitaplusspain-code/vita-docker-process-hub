@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections import Counter
+from pathlib import Path
 
 import cv2
 
@@ -58,7 +60,13 @@ def summarize(events: list[Event], frames: int) -> dict[str, object]:
 
 
 def replay(
-    path: str, weights: str, fps: float, min_score: float, presence: bool
+    path: str,
+    weights: str,
+    fps: float,
+    min_score: float,
+    presence: bool,
+    faces: str,
+    match_threshold: float,
 ) -> dict[str, object]:
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
@@ -68,6 +76,18 @@ def replay(
     engine = EventEngine("replay")
     fall = FallEngine("replay", min_score=min_score)
     tracker = Tracker()
+    identifier = None
+    if faces:
+        from vitahub.identity.face_id import FaceIdentifier
+        from vitahub.identity.gallery import load_gallery
+        from vitahub.identity.insightface_engine import InsightFaceEngine
+
+        engine_face = InsightFaceEngine.from_weights(
+            os.environ.get("VITAHUB_FACE_WEIGHTS", "/app/models/insightface")
+        )
+        identifier = FaceIdentifier(
+            engine_face, load_gallery(Path(faces), engine_face), match_threshold
+        )
     sink = _FilteredSink(StdoutJsonSink(), presence)
     camera = Camera(id="video", name=path, last_ip="")
     frames = 0
@@ -84,7 +104,15 @@ def replay(
                 last_sample = now
                 frames += 1
                 process_frame(
-                    camera, frame, detector, engine, sink, now, fall_engine=fall, tracker=tracker
+                    camera,
+                    frame,
+                    detector,
+                    engine,
+                    sink,
+                    now,
+                    fall_engine=fall,
+                    tracker=tracker,
+                    identifier=identifier,
                 )
     finally:
         cap.release()
@@ -99,8 +127,18 @@ def main() -> int:
     parser.add_argument("--fps", type=float, default=2.0)
     parser.add_argument("--min-score", type=float, default=0.3)
     parser.add_argument("--presence", action="store_true", help="imprime también person_*")
+    parser.add_argument("--faces", default="", help="carpeta de enrolados (activa identidad)")
+    parser.add_argument("--match-threshold", type=float, default=0.4)
     args = parser.parse_args()
-    summary = replay(args.video, args.weights, args.fps, args.min_score, args.presence)
+    summary = replay(
+        args.video,
+        args.weights,
+        args.fps,
+        args.min_score,
+        args.presence,
+        args.faces,
+        args.match_threshold,
+    )
     print(json.dumps(summary, ensure_ascii=False), file=sys.stderr)
     return 0
 
