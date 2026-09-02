@@ -27,7 +27,7 @@ from vitahub.analytics.fall_signals import (
     reference_y,
     score,
 )
-from vitahub.analytics.tracker import Match, Track, TrackerUpdate
+from vitahub.analytics.tracker import Match, Track, TrackerUpdate, TrackIdentity
 from vitahub.models import Camera, Event
 
 # Historial de alturas que se conserva por pista (cubre la ventana de drop_speed).
@@ -49,6 +49,17 @@ ResolvedReason = Literal["upright", "track_lost"]
 
 _SEV_HIGH = "high"
 _SEV_INFO = "info"
+
+
+def _person_payload(identity: TrackIdentity | None) -> dict[str, object] | None:
+    """Extrae identidad de la pista para el payload del evento.
+
+    None = pista anónima. El hub etiqueta, no filtra: quien decide por
+    identidad es el consumidor en AWS; del hogar solo sale el alias.
+    """
+    if identity is None:
+        return None
+    return {"id": identity.person_id, "confidence": round(identity.confidence, 3)}
 
 
 def _utcnow() -> datetime:
@@ -231,6 +242,7 @@ class FallEngine:
                 "score": round(current, 3),
                 "signals": signals.to_payload(),
                 "person_count": person_count,
+                "person": _person_payload(track.identity),
             },
         )
 
@@ -251,5 +263,6 @@ class FallEngine:
                 "duration_s": round(now - state.episode_start, 3),
                 "max_score": round(state.max_score, 3),
                 "reason": reason,
+                "person": _person_payload(track.identity),
             },
         )

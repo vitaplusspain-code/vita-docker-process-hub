@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
 from vitahub.analytics.fall_engine import FallEngine
-from vitahub.analytics.tracker import Tracker
+from vitahub.analytics.tracker import Tracker, TrackIdentity
 from vitahub.models import Camera, Detection
 
 CAM = Camera(id="onvif-abc", name="salon", last_ip="10.0.0.5")
@@ -246,3 +246,39 @@ def test_two_falls_get_distinct_episode_ids():
     assert [e.type for e in events] == ["fall_detected", "fall_detected"]
     assert events[0].payload["episode_id"] != events[1].payload["episode_id"]
     assert all(e.payload["person_count"] == 2 for e in events)
+
+
+def test_fall_events_carry_track_identity():
+    eng, tracker, clock = _engine()
+    update = tracker.observe(CAM.id, [standing()], 0.0)
+    update.matches[0].track.identity = TrackIdentity("maria", 0.87)
+    eng.observe(CAM, update, 0.0)
+    clock.advance(0.5)
+    events = _feed(eng, tracker, clock, [[standing()]] + [[lying()]] * 6 + [[standing()]] * 5,
+                   start=0.5)
+    assert [e.type for e in events] == ["fall_detected", "fall_resolved"]
+    assert all(e.payload["person"] == {"id": "maria", "confidence": 0.87} for e in events)
+
+
+def test_identity_arriving_after_fall_detected_shows_in_updates():
+    eng, tracker, clock = _engine()
+    events = _feed(eng, tracker, clock, [[standing()]] * 2 + [[lying()]] * 6)
+    assert [e.type for e in events] == ["fall_detected"]
+    assert events[0].payload["person"] is None
+    # La cara se ve más tarde (p. ej. al girarse): update y resolved la llevan.
+    update = tracker.observe(CAM.id, [lying()], 4.0)
+    update.matches[0].track.identity = TrackIdentity("maria", 0.71)
+    eng.observe(CAM, update, 4.0)
+    clock.advance(0.5)
+    # 20 frames a 0.5 s desde 4.5 llegan a 14.0: cruzan el fall_update de 13.0
+    # (cadencia de 10 s desde el fall_detected de 3.0).
+    late = _feed(eng, tracker, clock, [[lying()]] * 20, start=4.5)
+    assert "fall_update" in [e.type for e in late]
+    assert all(e.payload["person"] == {"id": "maria", "confidence": 0.71} for e in late)
+
+
+def test_anonymous_track_emits_person_null():
+    eng, tracker, clock = _engine()
+    events = _feed(eng, tracker, clock, [[standing()]] * 2 + [[lying()]] * 6 + [[]] * 7)
+    assert [e.type for e in events] == ["fall_detected", "fall_resolved"]
+    assert all(e.payload["person"] is None for e in events)
