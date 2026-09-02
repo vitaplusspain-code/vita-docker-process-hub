@@ -7,10 +7,11 @@ from vitahub.config import (
     Credentials,
     DiscoveryConfig,
     HubConfig,
+    IdentityConfig,
     InferenceConfig,
     UplinkConfig,
 )
-from vitahub.factory import build_detector, build_sink
+from vitahub.factory import build_detector, build_face_identifier, build_sink
 from vitahub.inference.person_pose_yolo import PosePersonDetector
 from vitahub.inference.person_yolo import PersonDetector
 from vitahub.inference.stub import StubDetector
@@ -31,14 +32,16 @@ def test_unknown_detector_raises():
         build_detector(InferenceConfig(detector="nope"), weights_path="unused.pt")
 
 
-def _hub_config(uplink: UplinkConfig) -> HubConfig:
+def _hub_config(
+    uplink: UplinkConfig | None = None, identity: IdentityConfig | None = None
+) -> HubConfig:
     return HubConfig(
         hub_id="hub-casa-lopez",
         discovery=DiscoveryConfig(),
-        inference=InferenceConfig(),
+        inference=InferenceConfig(identity=identity or IdentityConfig()),
         cameras=[],
         credentials=Credentials(onvif_user="admin", onvif_password="x"),
-        uplink=uplink,
+        uplink=uplink or UplinkConfig(enabled=False),
     )
 
 
@@ -156,3 +159,31 @@ def test_build_person_yolo_uses_from_weights(tmp_path, monkeypatch):
     )
     det = build_detector(InferenceConfig(detector="person_yolo"), weights_path=str(weights))
     assert isinstance(det, PersonDetector)
+
+
+def test_build_face_identifier_disabled_returns_none(tmp_path):
+    cfg = _hub_config(identity=IdentityConfig(enabled=False))
+    assert build_face_identifier(cfg, {}) is None
+
+
+def test_build_face_identifier_missing_weights_raises(tmp_path):
+    cfg = _hub_config(identity=IdentityConfig(enabled=True))
+    env = {
+        "VITAHUB_FACE_WEIGHTS": str(tmp_path / "no-existe"),
+        "VITAHUB_FACES_DIR": str(tmp_path),
+    }
+    with pytest.raises(ConfigError, match="modelos de reconocimiento facial"):
+        build_face_identifier(cfg, env)
+
+
+def test_build_face_identifier_missing_faces_dir_raises(tmp_path):
+    weights = tmp_path / "insightface" / "models" / "buffalo_s"
+    weights.mkdir(parents=True)
+    (weights / "det.onnx").touch()
+    cfg = _hub_config(identity=IdentityConfig(enabled=True))
+    env = {
+        "VITAHUB_FACE_WEIGHTS": str(tmp_path / "insightface"),
+        "VITAHUB_FACES_DIR": str(tmp_path / "faces-no-existe"),
+    }
+    with pytest.raises(ConfigError, match="faces"):
+        build_face_identifier(cfg, env)

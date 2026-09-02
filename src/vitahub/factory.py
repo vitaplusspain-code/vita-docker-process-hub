@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 
 from vitahub.config import ConfigError, HubConfig, InferenceConfig
+from vitahub.identity.face_id import FaceIdentifier
+from vitahub.identity.gallery import load_gallery
+from vitahub.identity.insightface_engine import InsightFaceEngine
 from vitahub.inference.base import Detector
 from vitahub.inference.person_pose_yolo import PosePersonDetector
 from vitahub.inference.person_yolo import PersonDetector
@@ -14,6 +18,9 @@ from vitahub.sinks.fanout import FanoutSink
 from vitahub.sinks.stdout_json import StdoutJsonSink
 
 _log = get_logger("factory")
+
+_DEFAULT_FACE_WEIGHTS = "/app/models/insightface"
+_DEFAULT_FACES_DIR = "/data/faces"
 
 
 def _require_weights(weights_path: str) -> None:
@@ -77,3 +84,37 @@ def build_sink(cfg: HubConfig) -> EventSink:
     topic = topic_for(cfg.uplink.topic_prefix, cfg.hub_id)
     _log.info("uplink habilitado hacia %s", topic)
     return FanoutSink([stdout, AwsIotSink(client, topic)])
+
+
+def _require_face_weights(root: str) -> None:
+    # FaceAnalysis descarga el pack de internet si falta — inaceptable en un
+    # hogar sin conexión y en /app de solo lectura. Mejor decir qué falta.
+    pack = Path(root) / "models" / "buffalo_s"
+    if not pack.is_dir() or not any(pack.iterdir()):
+        raise ConfigError(
+            f"modelos de reconocimiento facial no encontrados en {pack} — en el "
+            "contenedor los embebe el Dockerfile; en local, descárgalos con "
+            "'python scripts/download_face_models.py'"
+        )
+
+
+def build_face_identifier(cfg: HubConfig, env: Mapping[str, str]) -> FaceIdentifier | None:
+    if not cfg.inference.identity.enabled:
+        return None
+    root = env.get("VITAHUB_FACE_WEIGHTS", _DEFAULT_FACE_WEIGHTS)
+    faces_dir = Path(env.get("VITAHUB_FACES_DIR", _DEFAULT_FACES_DIR))
+    _require_face_weights(root)
+    if not faces_dir.is_dir():
+        raise ConfigError(
+            f"inference.identity.enabled es true pero no existe {faces_dir} — "
+            "crea /data/faces/<person_id>/ con 3-5 fotos de la persona"
+        )
+    engine = InsightFaceEngine.from_weights(root)
+    gallery = load_gallery(faces_dir, engine)
+    _log.info(
+        "identidad activada: %d personas enroladas (umbral %.2f)",
+        len(gallery.people), cfg.inference.identity.match_threshold,
+    )
+    return FaceIdentifier(
+        engine, gallery, match_threshold=cfg.inference.identity.match_threshold
+    )

@@ -3,6 +3,7 @@ from __future__ import annotations
 from vitahub.analytics.event_engine import EventEngine
 from vitahub.analytics.fall_engine import FallEngine
 from vitahub.analytics.tracker import Tracker
+from vitahub.identity.face_id import FaceIdentifier
 from vitahub.inference.base import Detector
 from vitahub.logging_setup import get_logger
 from vitahub.models import Camera, Event
@@ -14,6 +15,10 @@ _log = get_logger("worker")
 # un bug en el engine se loguea una vez, no en cada frame a 2 fps.
 _fall_failure_logged: set[str] = set()
 
+# Igual que _fall_failure_logged pero para el identificador: sin identidad
+# hay person: null, nunca un hub caído, y el aviso no debe repetirse a 2 fps.
+_identity_failure_logged: set[str] = set()
+
 
 def process_frame(
     camera: Camera,
@@ -24,6 +29,7 @@ def process_frame(
     now: float,
     fall_engine: FallEngine | None = None,
     tracker: Tracker | None = None,
+    identifier: FaceIdentifier | None = None,
 ) -> list[Event]:
     detections = detector.detect(frame)
     person_count = sum(1 for d in detections if d.label == "person")
@@ -32,6 +38,16 @@ def process_frame(
     if fall_engine is not None and tracker is not None:
         try:
             update = tracker.observe(camera.id, detections, now)
+            if identifier is not None:
+                try:
+                    identifier.identify(frame, camera.id, update.matches, now)
+                except Exception:  # noqa: BLE001 — sin identidad hay person null, no un hub caído
+                    if camera.id not in _identity_failure_logged:
+                        _identity_failure_logged.add(camera.id)
+                        _log.exception(
+                            "cam %s: error en el identificador (se silencia a partir de ahora)",
+                            camera.id,
+                        )
             events = events + fall_engine.observe(camera, update, now)
         except Exception:  # noqa: BLE001 — la caída no debe tumbar la presencia
             if camera.id not in _fall_failure_logged:

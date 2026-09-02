@@ -98,3 +98,36 @@ def test_fall_engine_exception_does_not_break_presence(caplog, monkeypatch):
     assert [e.type for e in emitted] == ["person_detected"]
     assert sink.events == emitted
     assert sum("analítica de caídas" in r.message for r in caplog.records) == 1
+
+
+def test_identifier_exception_does_not_break_falls(caplog, monkeypatch):
+    class _BoomIdentifier:
+        def identify(self, frame, camera_id, matches, now):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(worker_module, "_identity_failure_logged", set())
+    engine = EventEngine(hub_id="hub-1", present_after_s=2.0, absent_after_s=5.0)
+    fall = FallEngine(hub_id="hub-1", min_score=0.3)
+    tracker = Tracker()  # uno solo: la pista debe persistir entre frames
+    sink = _RecordingSink()
+    detector = StubDetector(person_count=1, keypoints=LYING_KPS, bbox=LYING_BOX)
+    all_events = []
+    now = 0.0
+    for _ in range(8):
+        all_events += process_frame(
+            CAM,
+            None,
+            detector,
+            engine,
+            sink,
+            now,
+            fall_engine=fall,
+            tracker=tracker,
+            identifier=_BoomIdentifier(),
+        )
+        now += 0.5
+    # Degradación silenciosa: sin identidad, pero la caída sale igual (person null).
+    fall_events = [e for e in all_events if e.type == "fall_detected"]
+    assert len(fall_events) == 1
+    assert fall_events[0].payload["person"] is None
+    assert sum("identificador" in r.message for r in caplog.records) == 1

@@ -15,7 +15,7 @@ from vitahub.analytics.tracker import Tracker
 from vitahub.config import ConfigError, load_config
 from vitahub.control import admin_port, start_control_server
 from vitahub.discovery.onvif import discover
-from vitahub.factory import build_detector, build_sink
+from vitahub.factory import build_detector, build_face_identifier, build_sink
 from vitahub.ingest.rtsp import (
     backoff_delay,
     is_stalled,
@@ -76,10 +76,21 @@ def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
     tracker = Tracker() if fall_engine is not None else None
     monitor = ConnectionMonitor(cfg.hub_id)
     sink = build_sink(cfg)
+    identifier = build_face_identifier(cfg, env)
 
     def worker(camera: Camera, rtsp_url: str, cam_stop: threading.Event) -> None:
         _camera_loop(  # type: ignore[no-untyped-call]
-            camera, rtsp_url, detector, engine, sink, cfg, cam_stop, monitor, fall_engine, tracker
+            camera,
+            rtsp_url,
+            detector,
+            engine,
+            sink,
+            cfg,
+            cam_stop,
+            monitor,
+            fall_engine,
+            tracker,
+            identifier,
         )
 
     supervisor = CameraSupervisor(worker)
@@ -175,7 +186,17 @@ def _emit_all(sink: EventSink, events: list[Event]) -> None:
 
 
 def _camera_loop(  # type: ignore[no-untyped-def]
-    camera, rtsp_url, detector, engine, sink, cfg, stop, monitor, fall_engine=None, tracker=None
+    camera,
+    rtsp_url,
+    detector,
+    engine,
+    sink,
+    cfg,
+    stop,
+    monitor,
+    fall_engine=None,
+    tracker=None,
+    identifier=None,
 ):
     attempt = 0
     while not stop.is_set():
@@ -220,6 +241,7 @@ def _camera_loop(  # type: ignore[no-untyped-def]
                             now,
                             fall_engine=fall_engine,
                             tracker=tracker,
+                            identifier=identifier,
                         )
                     except Exception:  # noqa: BLE001 — un frame malo no tumba el worker
                         _log.exception("cam %s error procesando frame", camera.id)
