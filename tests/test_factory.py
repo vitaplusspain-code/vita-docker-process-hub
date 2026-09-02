@@ -185,5 +185,5 @@ def test_build_face_identifier_missing_faces_dir_raises(tmp_path):
         "VITAHUB_FACE_WEIGHTS": str(tmp_path / "insightface"),
         "VITAHUB_FACES_DIR": str(tmp_path / "faces-no-existe"),
     }
-    with pytest.raises(ConfigError, match="faces"):
+    with pytest.raises(ConfigError, match="no existe"):
         build_face_identifier(cfg, env)

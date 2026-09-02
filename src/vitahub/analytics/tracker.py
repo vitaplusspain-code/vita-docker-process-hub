@@ -108,15 +108,20 @@ class Tracker:
         cam.tracks = [t for t in cam.tracks if now - t.last_seen < TRACK_TTL_S]
 
         matches: list[Match] = []
-        for track, det in self._match(cam.tracks, persons):
+        matched_idx: set[int] = set()
+        for track, di in self._match(cam.tracks, persons):
+            det = persons[di]
             step = max(0.0, now - track.last_seen)
             track.bbox = det.bbox
             track.last_seen = now
             matches.append(Match(track=track, detection=det, step_s=step))
+            matched_idx.add(di)
 
-        matched_dets = {id(m.detection) for m in matches}
-        for det in persons:
-            if id(det) in matched_dets:
+        # Dedup por índice, no por id(det): dos detecciones idénticas
+        # (mismo objeto Detection, p.ej. duplicado por el detector) deben
+        # abrir dos pistas, no una — id() las confundiría en una sola.
+        for di, det in enumerate(persons):
+            if di in matched_idx:
                 continue
             track = Track(track_id=self._next_id, bbox=det.bbox, last_seen=now)
             self._next_id += 1
@@ -126,8 +131,13 @@ class Tracker:
 
     def _match(
         self, tracks: list[Track], persons: list[Detection]
-    ) -> list[tuple[Track, Detection]]:
-        """Greedy por mayor IoU, luego por cercanía de centros."""
+    ) -> list[tuple[Track, int]]:
+        """Greedy por mayor IoU, luego por cercanía de centros.
+
+        Devuelve (Track, índice en `persons`) — no la Detection directamente,
+        para que el emparejamiento y el dedup en `observe` funcionen por
+        posición y no por identidad de objeto.
+        """
         pairs = sorted(
             (
                 (_iou(t.bbox, d.bbox), ti, di)
@@ -138,13 +148,13 @@ class Tracker:
         )
         used_t: set[int] = set()
         used_d: set[int] = set()
-        result: list[tuple[Track, Detection]] = []
+        result: list[tuple[Track, int]] = []
         for iou, ti, di in pairs:
             if iou < IOU_MATCH or ti in used_t or di in used_d:
                 continue
             used_t.add(ti)
             used_d.add(di)
-            result.append((tracks[ti], persons[di]))
+            result.append((tracks[ti], di))
 
         # Segunda pasada: pistas y detecciones aún sueltas, por cercanía de
         # centros (menor distancia primero). Rescata la caída sin solape.
@@ -162,5 +172,5 @@ class Tracker:
                 continue
             used_t.add(ti)
             used_d.add(di)
-            result.append((tracks[ti], persons[di]))
+            result.append((tracks[ti], di))
         return result

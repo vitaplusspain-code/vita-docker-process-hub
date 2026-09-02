@@ -327,7 +327,11 @@ hub.
 Limitaciones v1: una cara de menos de 40 px no se intenta (persona lejos de cámara, típico con
 `stream: substream`), y una oclusión de más de 3 s hace que la pista vuelva a anónima hasta ver la
 cara otra vez. El umbral se calibra con `scripts/replay_video.py --faces <carpeta>` sobre vídeo
-real, igual que los pesos y umbrales de caída (ver [como-probar.md](como-probar.md)).
+real, igual que los pesos y umbrales de caída (ver [como-probar.md](como-probar.md)). El ahorro de
+"solo se extrae mientras hay pistas anónimas" no cubre el caso de una persona no enrolada: es
+anónima para siempre, así que mientras esté en cámara la extracción sigue corriendo 1 vez/s por
+cámara indefinidamente; un backoff para pistas que llevan mucho sin matchear queda para más
+adelante.
 
 ## Separación stdout / stderr
 

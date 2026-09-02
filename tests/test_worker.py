@@ -1,7 +1,13 @@
+import numpy as np
+
 import vitahub.worker as worker_module
 from vitahub.analytics.event_engine import EventEngine
 from vitahub.analytics.fall_engine import FallEngine
 from vitahub.analytics.tracker import Tracker
+from vitahub.identity.base import FaceObservation
+from vitahub.identity.face_id import FaceIdentifier
+from vitahub.identity.gallery import Gallery
+from vitahub.identity.stub import StubFaceEngine
 from vitahub.inference.stub import StubDetector
 from vitahub.models import Camera, Event
 from vitahub.worker import process_frame
@@ -131,3 +137,44 @@ def test_identifier_exception_does_not_break_falls(caplog, monkeypatch):
     assert len(fall_events) == 1
     assert fall_events[0].payload["person"] is None
     assert sum("identificador" in r.message for r in caplog.records) == 1
+
+
+# Cara dentro de LYING_BOX (0, 90, 120, 120): centro (60, 105), 50 px de alto
+# (≥ MIN_FACE_PX). El embedding es el mismo vector unitario que la galería
+# de "maria", así que cada extracción coincide.
+MARIA = np.asarray([1.0, 0.0, 0.0], dtype=np.float32)
+FACE = FaceObservation((40, 80, 80, 130), MARIA)
+
+
+def test_identified_track_labels_fall_detected_person():
+    engine = EventEngine(hub_id="hub-1", present_after_s=2.0, absent_after_s=5.0)
+    fall = FallEngine(hub_id="hub-1", min_score=0.3)
+    tracker = Tracker()  # uno solo: la identidad viaja colgada de la pista
+    sink = _RecordingSink()
+    detector = StubDetector(person_count=1, keypoints=LYING_KPS, bbox=LYING_BOX)
+    gallery = Gallery(people={"maria": MARIA})
+    # identify() extrae como mucho 1 vez/s por cámara (ATTEMPT_EVERY_S): con
+    # frames cada 0.5 s solo se consume en el 1º y el 3º (t=0.0 y t=1.0), que
+    # son las dos coincidencias consistentes que exige la regla de 2.
+    face_engine = StubFaceEngine([[FACE], [FACE]])
+    identifier = FaceIdentifier(face_engine, gallery, match_threshold=0.4)
+    all_events = []
+    now = 0.0
+    for _ in range(8):
+        all_events += process_frame(
+            CAM,
+            None,
+            detector,
+            engine,
+            sink,
+            now,
+            fall_engine=fall,
+            tracker=tracker,
+            identifier=identifier,
+        )
+        now += 0.5
+
+    fall_events = [e for e in all_events if e.type == "fall_detected"]
+    assert len(fall_events) == 1
+    assert fall_events[0].payload["person"] == {"id": "maria", "confidence": 1.0}
+    assert face_engine.calls == 2

@@ -4,7 +4,10 @@ No hace falta ver la cara durante la caída: si el hub se la vio al entrar o
 al sentarse, la etiqueta viaja con la pista y el fall_detected sale ya
 identificado. El coste se controla: solo se extraen caras si hay alguna
 pista sin identidad, y como mucho una vez por segundo y por cámara (una
-extracción sirve a todas las pistas del frame).
+extracción sirve a todas las pistas del frame). Ese ahorro no es gratis para
+siempre: una persona no enrolada es anónima para siempre, así que mientras
+esté en cámara la extracción sigue corriendo 1 vez/s por cámara
+indefinidamente — no hay backoff para "esta pista nunca va a matchear".
 """
 from __future__ import annotations
 
@@ -20,9 +23,6 @@ _log = get_logger("identity")
 MIN_FACE_PX = 40
 # Cadencia máxima de extracción por cámara mientras haya pistas anónimas.
 ATTEMPT_EVERY_S = 1.0
-# Coincidencias consistentes necesarias para etiquetar: una sola puede ser
-# un frame ruidoso.
-CONFIRM_MATCHES = 2
 
 
 def _contains(bbox: tuple[int, int, int, int], x: float, y: float) -> bool:
@@ -82,6 +82,10 @@ class FaceIdentifier:
                 )
                 track.identity = TrackIdentity(person_id, sim)
             return
+        # Regla de 2 coincidencias: una primera vista deja la identidad en
+        # pendiente y solo se confirma si la siguiente extracción coincide
+        # con la misma persona. Una sola coincidencia puede ser un frame
+        # ruidoso; dos consecutivas ya bastan.
         pending = track.pending_identity
         if pending is not None and pending.person_id == person_id:
             track.identity = TrackIdentity(person_id, max(sim, pending.confidence))

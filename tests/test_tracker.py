@@ -80,3 +80,16 @@ def test_degenerate_bbox_never_raises():
     bad = _person((10, 10, 10, 10))
     for i in range(10):
         tracker.observe("cam-a", [bad], i * 0.5)
+
+
+def test_duplicate_detection_object_still_opens_two_tracks():
+    # El dedup de detecciones sin pareja debe ser por índice en `persons`, no
+    # por id(det): si el detector repite el mismo objeto Detection (dos
+    # personas con caja idéntica), el greedy solo puede emparejar una con la
+    # pista existente — la otra debe abrir pista nueva, no desaparecer.
+    tracker = Tracker()
+    tracker.observe("cam-a", [_person((10, 0, 50, 120))], 0.0)
+    same = _person((10, 0, 50, 120))
+    update = tracker.observe("cam-a", [same, same], 0.5)
+    assert len(update.matches) == 2
+    assert len({m.track.track_id for m in update.matches}) == 2
