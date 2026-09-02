@@ -57,6 +57,11 @@ def best_match(
 
 def load_gallery(faces_dir: Path, engine: FaceEngine) -> Gallery:
     """Falla con ConfigError legible: es un error de instalación y el técnico está delante."""
+    if not faces_dir.is_dir():
+        raise ConfigError(
+            f"carpeta de caras no existe: {faces_dir} — crea /data/faces/<person_id>/ "
+            "con 3-5 fotos de la cara (distintas luces y ángulos)"
+        )
     people: dict[str, npt.NDArray[np.float32]] = {}
     for person_dir in sorted(p for p in faces_dir.iterdir() if p.is_dir()):
         embeddings: list[npt.NDArray[np.float32]] = []
@@ -76,7 +81,7 @@ def load_gallery(faces_dir: Path, engine: FaceEngine) -> Gallery:
             embeddings.append(faces[0].embedding)
         if not embeddings:
             raise ConfigError(
-                f"la carpeta {person_dir} no tiene fotos válidas (.jpg/.png)"
+                f"la carpeta {person_dir} no tiene fotos válidas (.jpg/.jpeg/.png)"
             )
         people[person_dir.name] = mean_embedding(embeddings)
     if not people:
