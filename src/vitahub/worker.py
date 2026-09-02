@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from vitahub.analytics.event_engine import EventEngine
 from vitahub.analytics.fall_engine import FallEngine
+from vitahub.analytics.tracker import Tracker
 from vitahub.inference.base import Detector
 from vitahub.logging_setup import get_logger
 from vitahub.models import Camera, Event
@@ -22,14 +23,16 @@ def process_frame(
     sink: EventSink,
     now: float,
     fall_engine: FallEngine | None = None,
+    tracker: Tracker | None = None,
 ) -> list[Event]:
     detections = detector.detect(frame)
     person_count = sum(1 for d in detections if d.label == "person")
     confidence = max((d.confidence for d in detections), default=0.0)
     events = engine.observe(camera, person_count, confidence, now)
-    if fall_engine is not None:
+    if fall_engine is not None and tracker is not None:
         try:
-            events = events + fall_engine.observe(camera, detections, now)
+            update = tracker.observe(camera.id, detections, now)
+            events = events + fall_engine.observe(camera, update, now)
         except Exception:  # noqa: BLE001 — la caída no debe tumbar la presencia
             if camera.id not in _fall_failure_logged:
                 _fall_failure_logged.add(camera.id)

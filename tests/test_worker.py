@@ -1,6 +1,7 @@
 import vitahub.worker as worker_module
 from vitahub.analytics.event_engine import EventEngine
 from vitahub.analytics.fall_engine import FallEngine
+from vitahub.analytics.tracker import Tracker
 from vitahub.inference.stub import StubDetector
 from vitahub.models import Camera, Event
 from vitahub.worker import process_frame
@@ -62,12 +63,15 @@ def test_process_frame_without_fall_engine_is_unchanged():
 def test_process_frame_emits_presence_and_fall_through_same_sink():
     engine = EventEngine(hub_id="hub-1", present_after_s=2.0, absent_after_s=5.0)
     fall = FallEngine(hub_id="hub-1", min_score=0.3)
+    tracker = Tracker()
     sink = _RecordingSink()
     detector = StubDetector(person_count=1, keypoints=LYING_KPS, bbox=LYING_BOX)
     all_events = []
     now = 0.0
     for _ in range(8):
-        all_events += process_frame(CAM, None, detector, engine, sink, now, fall_engine=fall)
+        all_events += process_frame(
+            CAM, None, detector, engine, sink, now, fall_engine=fall, tracker=tracker
+        )
         now += 0.5
     types = [e.type for e in all_events]
     assert "person_detected" in types
@@ -77,17 +81,20 @@ def test_process_frame_emits_presence_and_fall_through_same_sink():
 
 def test_fall_engine_exception_does_not_break_presence(caplog, monkeypatch):
     class _Boom:
-        def observe(self, camera, detections, now):
+        def observe(self, camera, update, now):
             raise RuntimeError("boom")
 
     # El registro de "ya avisado" es global al módulo: se aísla para que el
     # test no dependa de si otro test ya quemó esta cámara.
     monkeypatch.setattr(worker_module, "_fall_failure_logged", set())
     engine = EventEngine(hub_id="hub-1", present_after_s=2.0, absent_after_s=5.0)
+    tracker = Tracker()
     sink = _RecordingSink()
     detector = StubDetector(person_count=1)
-    process_frame(CAM, None, detector, engine, sink, now=0.0, fall_engine=_Boom())
-    emitted = process_frame(CAM, None, detector, engine, sink, now=2.0, fall_engine=_Boom())
+    process_frame(CAM, None, detector, engine, sink, now=0.0, fall_engine=_Boom(), tracker=tracker)
+    emitted = process_frame(
+        CAM, None, detector, engine, sink, now=2.0, fall_engine=_Boom(), tracker=tracker
+    )
     assert [e.type for e in emitted] == ["person_detected"]
     assert sink.events == emitted
     assert sum("analítica de caídas" in r.message for r in caplog.records) == 1

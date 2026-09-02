@@ -17,6 +17,7 @@ import cv2
 
 from vitahub.analytics.event_engine import EventEngine
 from vitahub.analytics.fall_engine import FallEngine
+from vitahub.analytics.tracker import Tracker
 from vitahub.config import InferenceConfig
 from vitahub.factory import build_detector
 from vitahub.ingest.rtsp import should_sample
@@ -66,6 +67,7 @@ def replay(
     detector = build_detector(InferenceConfig(detector="person_pose"), weights)
     engine = EventEngine("replay")
     fall = FallEngine("replay", min_score=min_score)
+    tracker = Tracker()
     sink = _FilteredSink(StdoutJsonSink(), presence)
     camera = Camera(id="video", name=path, last_ip="")
     frames = 0
@@ -81,7 +83,9 @@ def replay(
             if should_sample(last_sample, now, fps):
                 last_sample = now
                 frames += 1
-                process_frame(camera, frame, detector, engine, sink, now, fall_engine=fall)
+                process_frame(
+                    camera, frame, detector, engine, sink, now, fall_engine=fall, tracker=tracker
+                )
     finally:
         cap.release()
         sink.close()

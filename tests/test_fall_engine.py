@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
 from vitahub.analytics.fall_engine import FallEngine
+from vitahub.analytics.tracker import Tracker
 from vitahub.models import Camera, Detection
 
 CAM = Camera(id="onvif-abc", name="salon", last_ip="10.0.0.5")
@@ -43,25 +44,25 @@ class _Clock:
 
 def _engine(min_score=0.3):
     clock = _Clock()
-    return FallEngine(hub_id="hub-1", min_score=min_score, clock=clock), clock
+    return FallEngine(hub_id="hub-1", min_score=min_score, clock=clock), Tracker(), clock
 
 
-def _feed(engine, clock, seq, step=0.5, start=0.0):
+def _feed(engine, tracker, clock, seq, step=0.5, start=0.0):
     """seq: lista de listas de detecciones, una por frame. Devuelve todos los eventos."""
     events = []
     now = start
     for dets in seq:
-        events += engine.observe(CAM, dets, now)
+        events += engine.observe(CAM, tracker.observe(CAM.id, dets, now), now)
         now += step
         clock.advance(step)
     return events
 
 
 def test_sudden_fall_emits_detected_after_two_seconds_on_floor():
-    eng, clock = _engine()
+    eng, tracker, clock = _engine()
     # 1 s de pie, caída en 0.5 s, luego en el suelo
     seq = [[standing()]] * 2 + [[lying()]] * 6
-    events = _feed(eng, clock, seq)
+    events = _feed(eng, tracker, clock, seq)
     assert [e.type for e in events] == ["fall_detected"]
     ev = events[0]
     assert ev.severity == "high"
@@ -74,36 +75,36 @@ def test_sudden_fall_emits_detected_after_two_seconds_on_floor():
 
 
 def test_no_event_before_two_seconds_on_floor():
-    eng, clock = _engine()
+    eng, tracker, clock = _engine()
     seq = [[standing()]] * 2 + [[lying()]] * 4  # 1.5 s en el suelo (frames a 0, .5, 1, 1.5)
-    assert _feed(eng, clock, seq) == []
+    assert _feed(eng, tracker, clock, seq) == []
 
 
 def test_slow_lie_down_scores_low_and_respects_min_score():
-    eng, clock = _engine(min_score=0.5)
+    eng, tracker, clock = _engine(min_score=0.5)
     # Sin transición brusca: aparece ya tumbada y no se mueve (drop_speed = 0),
     # así que el score es 0.35 + 0.05·s de suelo. La permanencia sola acaba
     # superando 0.5 a los 3 s (por diseño: seguir en el suelo es cada vez más
     # sospechoso), así que esta rama se limita a 2.5 s de suelo (score 0.475).
     seq_short = [[lying()]] * 6
-    assert _feed(eng, clock, seq_short) == []
+    assert _feed(eng, tracker, clock, seq_short) == []
     seq = [[lying()]] * 8
-    eng2, clock2 = _engine(min_score=0.3)
-    events = _feed(eng2, clock2, seq)
+    eng2, tracker2, clock2 = _engine(min_score=0.3)
+    events = _feed(eng2, tracker2, clock2, seq)
     assert [e.type for e in events] == ["fall_detected"]
     assert events[0].payload["score"] < 0.5
 
 
 def test_crouch_and_stand_up_emits_nothing():
-    eng, clock = _engine()
+    eng, tracker, clock = _engine()
     seq = [[standing()]] * 2 + [[lying()]] * 3 + [[standing()]] * 8
-    assert _feed(eng, clock, seq) == []
+    assert _feed(eng, tracker, clock, seq) == []
 
 
 def test_updates_every_ten_seconds_while_on_floor():
-    eng, clock = _engine()
+    eng, tracker, clock = _engine()
     seq = [[standing()]] * 2 + [[lying()]] * 60  # 30 s en el suelo
-    events = _feed(eng, clock, seq)
+    events = _feed(eng, tracker, clock, seq)
     types = [e.type for e in events]
     assert types[0] == "fall_detected"
     assert types.count("fall_update") == 2  # a +10 s y +20 s del detected
@@ -112,9 +113,9 @@ def test_updates_every_ten_seconds_while_on_floor():
 
 
 def test_resolved_when_person_stands_up():
-    eng, clock = _engine()
+    eng, tracker, clock = _engine()
     seq = [[standing()]] * 2 + [[lying()]] * 6 + [[standing()]] * 5
-    events = _feed(eng, clock, seq)
+    events = _feed(eng, tracker, clock, seq)
     assert [e.type for e in events] == ["fall_detected", "fall_resolved"]
     res = events[1]
     assert res.severity == "info"
@@ -125,9 +126,9 @@ def test_resolved_when_person_stands_up():
 
 
 def test_resolved_when_track_disappears():
-    eng, clock = _engine()
+    eng, tracker, clock = _engine()
     seq = [[standing()]] * 2 + [[lying()]] * 6 + [[]] * 7  # 3 s sin verla
-    events = _feed(eng, clock, seq)
+    events = _feed(eng, tracker, clock, seq)
     assert [e.type for e in events] == ["fall_detected", "fall_resolved"]
     # Sin verla de pie no hay confirmacion de que se levantara: el consumidor
     # (motor de reglas) no debe cerrar la alerta por este motivo.
@@ -137,43 +138,43 @@ def test_resolved_when_track_disappears():
 def test_missing_keypoints_uses_bbox_and_never_raises():
     # Sin pose solo puntúan brusquedad y permanencia: el score es bajo; el
     # umbral se baja para comprobar el camino de caja, no la calibración.
-    eng, clock = _engine(min_score=0.1)
+    eng, tracker, clock = _engine(min_score=0.1)
     tall = Detection("person", 0.9, (30, 0, 70, 120), None)
     wide = Detection("person", 0.9, (0, 50, 100, 120), None)
     seq = [[tall]] * 2 + [[wide]] * 6
-    events = _feed(eng, clock, seq)
+    events = _feed(eng, tracker, clock, seq)
     assert [e.type for e in events] == ["fall_detected"]
     assert events[0].payload["signals"]["torso_angle"] is None
     assert events[0].payload["signals"]["keypoint_conf"] is None
 
 
 def test_degenerate_detections_do_not_raise():
-    eng, clock = _engine()
+    eng, tracker, clock = _engine()
     bad = Detection("person", 0.9, (10, 10, 10, 10), ())
-    assert _feed(eng, clock, [[bad]] * 10) == []
+    assert _feed(eng, tracker, clock, [[bad]] * 10) == []
 
 
 def test_two_people_are_tracked_separately():
-    eng, clock = _engine()
+    eng, tracker, clock = _engine()
     # Persona A de pie a la izquierda; persona B cae a la derecha
     seq = [[standing(60), standing(300)]] * 2 + [[standing(60), lying(300)]] * 6
-    events = _feed(eng, clock, seq)
+    events = _feed(eng, tracker, clock, seq)
     assert [e.type for e in events] == ["fall_detected"]
     assert events[0].payload["person_count"] == 2
 
 
 def test_per_camera_state_is_independent():
-    eng, _clock = _engine()
+    eng, tracker, _clock = _engine()
     other = Camera(id="onvif-xyz", name="cocina", last_ip="10.0.0.6")
     now = 0.0
     for _ in range(2):
-        eng.observe(CAM, [standing()], now)
-        eng.observe(other, [standing()], now)
+        eng.observe(CAM, tracker.observe(CAM.id, [standing()], now), now)
+        eng.observe(other, tracker.observe(other.id, [standing()], now), now)
         now += 0.5
     events = []
     for _ in range(6):
-        events += eng.observe(CAM, [lying()], now)
-        events += eng.observe(other, [standing()], now)
+        events += eng.observe(CAM, tracker.observe(CAM.id, [lying()], now), now)
+        events += eng.observe(other, tracker.observe(other.id, [standing()], now), now)
         now += 0.5
     assert [(e.type, e.camera_id) for e in events] == [("fall_detected", "onvif-abc")]
 
@@ -181,17 +182,18 @@ def test_per_camera_state_is_independent():
 def test_sampling_gap_does_not_inflate_floor_time():
     # El tiempo en el suelo es tiempo *observado*: un hueco de muestreo de
     # 2.5 s solo suma MAX_STEP_S (1 s), no los 2.5 s de reloj.
-    eng, clock = _engine()
+    eng, tracker, clock = _engine()
     for now in (0.0, 0.5):
-        assert eng.observe(CAM, [standing()], now) == []
+        assert eng.observe(CAM, tracker.observe(CAM.id, [standing()], now), now) == []
         clock.advance(0.5)
-    assert eng.observe(CAM, [lying()], 1.0) == []  # floor_time 0
+    assert eng.observe(CAM, tracker.observe(CAM.id, [lying()], 1.0), 1.0) == []  # floor_time 0
     clock.advance(2.5)
-    assert eng.observe(CAM, [lying()], 3.5) == []  # hueco: +1.0 (tope), no +2.5
+    # hueco: +1.0 (tope), no +2.5
+    assert eng.observe(CAM, tracker.observe(CAM.id, [lying()], 3.5), 3.5) == []
     clock.advance(0.5)
-    assert eng.observe(CAM, [lying()], 4.0) == []  # 1.5
+    assert eng.observe(CAM, tracker.observe(CAM.id, [lying()], 4.0), 4.0) == []  # 1.5
     clock.advance(0.5)
-    events = eng.observe(CAM, [lying()], 4.5)  # 2.0
+    events = eng.observe(CAM, tracker.observe(CAM.id, [lying()], 4.5), 4.5)  # 2.0
     assert [e.type for e in events] == ["fall_detected"]
     assert events[0].payload["signals"]["floor_time_s"] == 2.0
 
@@ -199,25 +201,26 @@ def test_sampling_gap_does_not_inflate_floor_time():
 def test_gap_then_reappear_resolves_and_starts_new_track():
     # Sin llamadas a observe durante 5 s la pista caduca: al reaparecer, ese
     # mismo frame resuelve el episodio y abre pista nueva (nada más).
-    eng, clock = _engine()
-    events = _feed(eng, clock, [[standing()]] * 2 + [[lying()]] * 6)
+    eng, tracker, clock = _engine()
+    events = _feed(eng, tracker, clock, [[standing()]] * 2 + [[lying()]] * 6)
     assert [e.type for e in events] == ["fall_detected"]
     clock.advance(5.0)
-    late = eng.observe(CAM, [lying()], 8.5)
+    late = eng.observe(CAM, tracker.observe(CAM.id, [lying()], 8.5), 8.5)
     assert [e.type for e in late] == ["fall_resolved"]
     assert late[0].payload["episode_id"] == events[0].payload["episode_id"]
     assert late[0].payload["reason"] == "track_lost"
     clock.advance(0.5)
-    assert eng.observe(CAM, [lying()], 9.0) == []  # pista nueva: sigue en candidate
+    # pista nueva: sigue en candidate
+    assert eng.observe(CAM, tracker.observe(CAM.id, [lying()], 9.0), 9.0) == []
 
 
 def test_forward_fall_without_box_overlap_keeps_track():
     # Caída hacia delante: la caja tumbada no solapa con la de pie (IoU = 0),
     # pero los centros están a ~87 px (≤ 120 = lado mayor) → misma pista.
-    eng, clock = _engine()
+    eng, tracker, clock = _engine()
     away = Detection("person", 0.9, (80, 60, 180, 130),
                      _pose(nose=(90, 115), shoulders=(100, 115), hips=(150, 115)))
-    events = _feed(eng, clock, [[standing()]] * 2 + [[away]] * 6)
+    events = _feed(eng, tracker, clock, [[standing()]] * 2 + [[away]] * 6)
     assert [e.type for e in events] == ["fall_detected"]
     assert events[0].payload["signals"]["drop_speed"] is not None
     assert events[0].payload["score"] >= 0.7
@@ -226,9 +229,9 @@ def test_forward_fall_without_box_overlap_keeps_track():
 def test_resolved_max_score_is_episode_peak():
     # El score sube mientras sigue en el suelo (permanencia) aunque no toque
     # emitir fall_update: max_score debe recoger ese pico, no el del detected.
-    eng, clock = _engine()
+    eng, tracker, clock = _engine()
     seq = [[standing()]] * 2 + [[lying()]] * 14 + [[standing()]] * 5
-    events = _feed(eng, clock, seq)
+    events = _feed(eng, tracker, clock, seq)
     assert [e.type for e in events] == ["fall_detected", "fall_resolved"]
     assert events[0].payload["score"] == 0.75
     assert events[1].payload["max_score"] == 0.9
@@ -237,9 +240,9 @@ def test_resolved_max_score_is_episode_peak():
 def test_two_falls_get_distinct_episode_ids():
     # Dos personas cuyas cajas se solapan al caer, en el mismo segundo: los
     # episodios deben distinguirse aunque compartan cámara e instante.
-    eng, clock = _engine()
+    eng, tracker, clock = _engine()
     seq = [[standing(50), standing(110)]] * 2 + [[lying(50), lying(110)]] * 6
-    events = _feed(eng, clock, seq)
+    events = _feed(eng, tracker, clock, seq)
     assert [e.type for e in events] == ["fall_detected", "fall_detected"]
     assert events[0].payload["episode_id"] != events[1].payload["episode_id"]
     assert all(e.payload["person_count"] == 2 for e in events)

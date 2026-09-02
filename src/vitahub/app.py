@@ -11,6 +11,7 @@ from pathlib import Path
 from vitahub.analytics.connection_monitor import ConnectionMonitor
 from vitahub.analytics.event_engine import EventEngine
 from vitahub.analytics.fall_engine import FallEngine
+from vitahub.analytics.tracker import Tracker
 from vitahub.config import ConfigError, load_config
 from vitahub.control import admin_port, start_control_server
 from vitahub.discovery.onvif import discover
@@ -72,12 +73,13 @@ def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
     )
     if fall_engine is not None:
         _log.info("analítica de caídas activada (min_score=%.2f)", cfg.inference.fall.min_score)
+    tracker = Tracker() if fall_engine is not None else None
     monitor = ConnectionMonitor(cfg.hub_id)
     sink = build_sink(cfg)
 
     def worker(camera: Camera, rtsp_url: str, cam_stop: threading.Event) -> None:
         _camera_loop(  # type: ignore[no-untyped-call]
-            camera, rtsp_url, detector, engine, sink, cfg, cam_stop, monitor, fall_engine
+            camera, rtsp_url, detector, engine, sink, cfg, cam_stop, monitor, fall_engine, tracker
         )
 
     supervisor = CameraSupervisor(worker)
@@ -173,7 +175,7 @@ def _emit_all(sink: EventSink, events: list[Event]) -> None:
 
 
 def _camera_loop(  # type: ignore[no-untyped-def]
-    camera, rtsp_url, detector, engine, sink, cfg, stop, monitor, fall_engine=None
+    camera, rtsp_url, detector, engine, sink, cfg, stop, monitor, fall_engine=None, tracker=None
 ):
     attempt = 0
     while not stop.is_set():
@@ -210,7 +212,14 @@ def _camera_loop(  # type: ignore[no-untyped-def]
                     last_sample = now
                     try:
                         process_frame(
-                            camera, frame, detector, engine, sink, now, fall_engine=fall_engine
+                            camera,
+                            frame,
+                            detector,
+                            engine,
+                            sink,
+                            now,
+                            fall_engine=fall_engine,
+                            tracker=tracker,
                         )
                     except Exception:  # noqa: BLE001 — un frame malo no tumba el worker
                         _log.exception("cam %s error procesando frame", camera.id)
