@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vitahub — administración</title>
+<style>
+  :root { font-family: system-ui, sans-serif; }
+  body { margin: 0 auto; max-width: 640px; padding: 1rem; background: #fafafa; color: #222; }
+  h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
+  section { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin: 1rem 0; }
+  button { padding: .5rem 1rem; border-radius: 6px; border: 1px solid #888; background: #fff; cursor: pointer; }
+  button.primary { background: #1a6b3c; color: #fff; border-color: #1a6b3c; }
+  input[type=text], input[type=password], input[type=range] { width: 100%; box-sizing: border-box; padding: .4rem; }
+  .person { display: flex; align-items: center; gap: .6rem; margin: .5rem 0; flex-wrap: wrap; }
+  .person img { width: 56px; height: 56px; object-fit: cover; border-radius: 6px; }
+  .msg { padding: .5rem; border-radius: 6px; margin: .5rem 0; }
+  .msg.ok { background: #e6f4ea; } .msg.error { background: #fdecea; }
+  .row { display: flex; gap: .6rem; align-items: center; margin: .5rem 0; }
+  #login[hidden], #app[hidden] { display: none; }
+</style>
+</head>
+<body>
+<h1>vitahub — administración</h1>
+<div id="msg"></div>
+
+<section id="login" hidden>
+  <h2>Token de acceso</h2>
+  <input type="password" id="token-input" placeholder="token del hub" autocomplete="off">
+  <div class="row"><button class="primary" id="token-save">Entrar</button></div>
+</section>
+
+<div id="app" hidden>
+<section>
+  <h2>Personas enroladas</h2>
+  <div id="people"></div>
+  <div class="row">
+    <input type="text" id="new-person" placeholder="nombre (p. ej. maria)">
+    <input type="file" id="photo-file" accept="image/*" capture="environment" hidden>
+    <button id="add-photo">Añadir foto…</button>
+  </div>
+  <p>3–5 fotos por persona, con distintas luces y ángulos. Cada foto debe tener exactamente una cara.</p>
+</section>
+
+<section>
+  <h2>Configuración</h2>
+  <label class="row"><input type="checkbox" id="fall"> Detección de caídas</label>
+  <label class="row"><input type="checkbox" id="identity"> Identidad de persona (requiere caídas)</label>
+  <label>Umbral de coincidencia (<span id="thr-val">0.40</span> — 0.4 = sin calibrar)
+    <input type="range" id="thr" min="0.05" max="1" step="0.05">
+  </label>
+  <div class="row"><button id="save-config">Guardar configuración</button></div>
+</section>
+
+<section>
+  <h2>Aplicar</h2>
+  <p>Valida todo y reinicia el hub (unos segundos sin detección).</p>
+  <div class="row"><button class="primary" id="apply">Aplicar y reiniciar</button></div>
+</section>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let token = localStorage.getItem("vitahub_token") || "";
+
+function msg(text, cls) {
+  $("msg").innerHTML = text ? `<div class="msg ${cls}">${text}</div>` : "";
+}
+
+async function api(path, opts = {}) {
+  opts.headers = Object.assign({ "Authorization": "Bearer " + token }, opts.headers);
+  const resp = await fetch(path, opts);
+  if (resp.status === 401) { showLogin(); throw new Error("token inválido"); }
+  if (!resp.ok) {
+    let detail = resp.statusText;
+    try { detail = (await resp.json()).error; } catch (e) {}
+    throw new Error(detail);
+  }
+  return resp;
+}
+
+function showLogin() { $("login").hidden = false; $("app").hidden = true; }
+function showApp() { $("login").hidden = true; $("app").hidden = false; }
+
+async function refreshPeople() {
+  const data = await (await api("/api/people")).json();
+  const box = $("people");
+  box.innerHTML = "";
+  for (const p of data.people) {
+    const div = document.createElement("div");
+    div.className = "person";
+    div.innerHTML = `<strong>${p.id}</strong> (${p.photos.length} fotos)`;
+    for (const name of p.photos) {
+      const img = document.createElement("img");
+      api(`/api/people/${p.id}/photos/${name}`)
+        .then(r => r.blob()).then(b => { img.src = URL.createObjectURL(b); });
+      img.title = name + " — toca para borrar";
+      img.onclick = async () => {
+        if (!confirm(`¿Borrar ${name} de ${p.id}?`)) return;
+        await api(`/api/people/${p.id}/photos/${name}`, { method: "DELETE" });
+        refreshPeople();
+      };
+      div.appendChild(img);
+    }
+    const del = document.createElement("button");
+    del.textContent = "Borrar persona";
+    del.onclick = async () => {
+      if (!confirm(`¿Borrar a ${p.id} y todas sus fotos?`)) return;
+      await api(`/api/people/${p.id}`, { method: "DELETE" });
+      refreshPeople();
+    };
+    div.appendChild(del);
+    box.appendChild(div);
+  }
+}
+
+async function refreshConfig() {
+  const c = await (await api("/api/config")).json();
+  $("fall").checked = c.fall_enabled;
+  $("identity").checked = c.identity_enabled;
+  $("thr").value = c.match_threshold;
+  $("thr-val").textContent = Number(c.match_threshold).toFixed(2);
+}
+
+$("thr").oninput = () => { $("thr-val").textContent = Number($("thr").value).toFixed(2); };
+$("identity").onchange = () => { if ($("identity").checked) $("fall").checked = true; };
+
+$("add-photo").onclick = () => {
+  const id = $("new-person").value.trim().toLowerCase().replace(/[^a-z0-9-]/g, "-");
+  if (!id) { msg("Escribe primero el nombre de la persona", "error"); return; }
+  $("new-person").value = id;
+  $("photo-file").click();
+};
+
+$("photo-file").onchange = async () => {
+  const file = $("photo-file").files[0];
+  if (!file) return;
+  const id = $("new-person").value.trim();
+  try {
+    await api(`/api/people/${id}/photos`, {
+      method: "POST", body: file, headers: { "Content-Type": file.type },
+    });
+    msg(`Foto guardada para ${id} ✓`, "ok");
+    refreshPeople();
+  } catch (err) { msg("Foto rechazada: " + err.message, "error"); }
+  $("photo-file").value = "";
+};
+
+$("save-config").onclick = async () => {
+  try {
+    await api("/api/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        fall_enabled: $("fall").checked,
+        identity_enabled: $("identity").checked,
+        match_threshold: Number($("thr").value),
+      }),
+    });
+    msg("Configuración guardada ✓ (se aplica al reiniciar)", "ok");
+  } catch (err) { msg("Config rechazada: " + err.message, "error"); }
+};
+
+$("apply").onclick = async () => {
+  if (!confirm("El hub validará todo y se reiniciará (unos segundos sin detección). ¿Continuar?")) return;
+  try {
+    await api("/api/apply", { method: "POST" });
+  } catch (err) { msg("No se puede aplicar: " + err.message, "error"); return; }
+  msg("Reiniciando… esperando a que el hub vuelva", "ok");
+  const poll = setInterval(async () => {
+    try {
+      const data = await (await api("/api/people")).json();
+      clearInterval(poll);
+      msg(`Hub reiniciado con ${data.people.length} personas enroladas ✓`, "ok");
+      refreshConfig();
+    } catch (e) { /* aún reiniciando */ }
+  }, 2000);
+};
+
+$("token-save").onclick = async () => {
+  token = $("token-input").value.trim();
+  localStorage.setItem("vitahub_token", token);
+  try { await api("/api/people"); showApp(); msg("", ""); await refreshPeople(); await refreshConfig(); }
+  catch (err) { msg("Token inválido", "error"); }
+};
+
+(async () => {
+  if (!token) { showLogin(); return; }
+  try { showApp(); await refreshPeople(); await refreshConfig(); }
+  catch (err) { /* api() ya mostró el login si era 401 */ }
+})();
+</script>
+</body>
+</html>

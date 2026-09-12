@@ -424,3 +424,16 @@ def test_apply_identity_without_people_is_400(admin_server):
     status, _body = _request(f"{base}/api/apply", method="POST", token="secreto")
     assert status == 400
     assert shutdowns == []
+
+
+def test_root_serves_page_without_token(admin_server):
+    base, _ = admin_server()
+    status, body = _request(f"{base}/")
+    assert status == 200
+    assert b"vitahub" in body.lower()
+
+
+def test_root_without_admin_context_is_404(server_factory):
+    base = server_factory(_FakeService(_ok_result()))
+    status, _body = _request(f"{base}/")
+    assert status == 404

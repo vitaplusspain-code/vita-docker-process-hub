@@ -7,6 +7,7 @@ import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib import resources
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -88,6 +89,12 @@ def _build_handler(
         timeout = 10
 
         def do_GET(self) -> None:
+            if self.path == "/" and admin is not None:
+                page = (
+                    resources.files("vitahub.admin") / "static" / "index.html"
+                ).read_bytes()
+                self._respond_bytes(200, page, "text/html; charset=utf-8")
+                return
             if admin is None or not self.path.startswith("/api"):
                 self._respond(404)
                 return
