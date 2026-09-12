@@ -2,11 +2,23 @@ from __future__ import annotations
 
 import hmac
 import json
+import re
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, Protocol
 
+from vitahub.admin.enrollment import (
+    EnrollmentError,
+    delete_person,
+    delete_photo,
+    list_people,
+    photo_bytes,
+    save_photo,
+)
+from vitahub.identity.base import FaceEngine
 from vitahub.logging_setup import get_logger, register_secret
 from vitahub.rescan import RescanResult
 
@@ -14,9 +26,27 @@ _log = get_logger("control")
 
 _DEFAULT_PORT = 8787
 
+_MAX_PHOTO_BYTES = 10 * 1024 * 1024
+
+_PEOPLE_RE = re.compile(r"^/api/people$")
+_PHOTOS_RE = re.compile(r"^/api/people/([^/]+)/photos$")
+_PHOTO_RE = re.compile(r"^/api/people/([^/]+)/photos/([^/]+)$")
+_PERSON_RE = re.compile(r"^/api/people/([^/]+)$")
+
 
 class _Rescannable(Protocol):
     def run_once(self) -> RescanResult: ...
+
+
+@dataclass
+class AdminContext:
+    """Dependencias de las rutas /api/*. Sin él, el servidor es solo /rescan."""
+
+    faces_dir: Path
+    config_path: Path
+    env: Mapping[str, str]
+    engine_factory: Callable[[], FaceEngine]
+    request_shutdown: Callable[[], None]
 
 
 def admin_port(env: Mapping[str, str]) -> int:
@@ -35,20 +65,109 @@ def admin_port(env: Mapping[str, str]) -> int:
 
 
 def _build_handler(
-    service: _Rescannable, token: str
+    service: _Rescannable, token: str, admin: AdminContext | None = None
 ) -> type[BaseHTTPRequestHandler]:
+    # Perezoso: los pesos del motor solo se cargan si el técnico enrola de
+    # verdad, no en cada arranque del servidor de control.
+    engine_lock = threading.Lock()
+    engine_cache: list[FaceEngine] = []
+
+    def _engine() -> FaceEngine:
+        assert admin is not None
+        with engine_lock:
+            if not engine_cache:
+                engine_cache.append(admin.engine_factory())
+            return engine_cache[0]
+
     class _Handler(BaseHTTPRequestHandler):
         # Socket timeout para evitar slow-loris: conexiones lentas o inertes
         # no deben agotar hilos ni descriptores del proceso. Crítico porque
         # el servidor es accesible desde la WiFi del cliente.
         timeout = 10
 
-        # Sin body ni parámetros: no hay nada que parsear, luego no hay
-        # superficie de inyección.
-        def do_POST(self) -> None:
-            if self.path != "/rescan":
+        def do_GET(self) -> None:
+            if admin is None or not self.path.startswith("/api"):
                 self._respond(404)
                 return
+            if not self._authorized():
+                self._respond(401)
+                return
+            if _PEOPLE_RE.match(self.path):
+                people = list_people(admin.faces_dir)
+                self._respond(
+                    200, {"people": [{"id": p.id, "photos": p.photos} for p in people]}
+                )
+                return
+            if m := _PHOTO_RE.match(self.path):
+                try:
+                    data = photo_bytes(admin.faces_dir, m.group(1), m.group(2))
+                except EnrollmentError as err:
+                    self._respond(err.status, {"error": err.message})
+                    return
+                self._respond_bytes(200, data, "image/jpeg")
+                return
+            self._respond(404)
+
+        def do_POST(self) -> None:
+            if self.path == "/rescan":
+                self._handle_rescan()
+                return
+            if admin is None or not self.path.startswith("/api"):
+                self._respond(404)
+                return
+            if not self._authorized():
+                self._respond(401)
+                return
+            if m := _PHOTOS_RE.match(self.path):
+                length = int(self.headers.get("Content-Length") or 0)
+                if length <= 0:
+                    self._respond(400, {"error": "cuerpo vacío"})
+                    return
+                if length > _MAX_PHOTO_BYTES:
+                    # Drenamos el cuerpo antes de responder: si cerramos con
+                    # datos aún pendientes de escribir, el cliente ve un
+                    # broken pipe en vez del 413.
+                    self.rfile.read(length)
+                    self._respond(413, {"error": "foto demasiado grande (máx. 10 MB)"})
+                    return
+                body = self.rfile.read(length)
+                try:
+                    saved = save_photo(admin.faces_dir, m.group(1), body, _engine())
+                except EnrollmentError as err:
+                    self._respond(err.status, {"error": err.message})
+                    return
+                self._respond(200, {"saved": saved})
+                return
+            self._respond(404)
+
+        def do_DELETE(self) -> None:
+            if admin is None or not self.path.startswith("/api"):
+                self._respond(404)
+                return
+            if not self._authorized():
+                self._respond(401)
+                return
+            if m := _PHOTO_RE.match(self.path):
+                try:
+                    delete_photo(admin.faces_dir, m.group(1), m.group(2))
+                except EnrollmentError as err:
+                    self._respond(err.status, {"error": err.message})
+                    return
+                self._respond(200, {})
+                return
+            if m := _PERSON_RE.match(self.path):
+                try:
+                    delete_person(admin.faces_dir, m.group(1))
+                except EnrollmentError as err:
+                    self._respond(err.status, {"error": err.message})
+                    return
+                self._respond(200, {})
+                return
+            self._respond(404)
+
+        # Sin body ni parámetros: no hay nada que parsear, luego no hay
+        # superficie de inyección.
+        def _handle_rescan(self) -> None:
             if not self._authorized():
                 _log.warning("control: petición rechazada desde %s",
                              self.client_address[0])
@@ -71,9 +190,6 @@ def _build_handler(
                     "cameras": result.cameras,
                 },
             )
-
-        def do_GET(self) -> None:
-            self._respond(404)
 
         def send_error(
             self, code: int, message: str | None = None, explain: str | None = None
@@ -121,6 +237,13 @@ def _build_handler(
             if body:
                 self.wfile.write(body)
 
+        def _respond_bytes(self, code: int, body: bytes, content_type: str) -> None:
+            self.send_response(code)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def log_message(self, format: str, *args: Any) -> None:
             # Por defecto BaseHTTPRequestHandler escribe a stderr crudo; se
             # redirige al logger JSON para no ensuciar el formato.
@@ -130,14 +253,18 @@ def _build_handler(
 
 
 def start_control_server(
-    service: _Rescannable, token: str, port: int, host: str = "0.0.0.0"
+    service: _Rescannable,
+    token: str,
+    port: int,
+    host: str = "0.0.0.0",
+    admin: AdminContext | None = None,
 ) -> ThreadingHTTPServer | None:
     """Arranca el servidor de control. Sin token no se abre ningún puerto."""
     if not token:
         _log.warning("control HTTP deshabilitado: define VITAHUB_ADMIN_TOKEN")
         return None
     register_secret(token)
-    httpd = ThreadingHTTPServer((host, port), _build_handler(service, token))
+    httpd = ThreadingHTTPServer((host, port), _build_handler(service, token, admin))
     # Cada petición corre en su propio hilo (ThreadingMixIn); sin esto no son
     # daemon, así que una petición en vuelo en el momento del shutdown()
     # retrasaría la salida del proceso (o la impediría si se cuelga).
