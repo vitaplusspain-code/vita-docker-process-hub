@@ -5,8 +5,10 @@ load_gallery al arrancar: una foto aceptada aquí jamás rompe el arranque.
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -49,7 +51,10 @@ def list_people(faces_dir: Path) -> list[PersonSummary]:
     if not faces_dir.is_dir():
         return []
     people = []
-    for person_dir in sorted(p for p in faces_dir.iterdir() if p.is_dir()):
+    for person_dir in sorted(
+        p for p in faces_dir.iterdir()
+        if p.is_dir() and _PERSON_ID_RE.match(p.name)
+    ):
         photos = sorted(
             p.name for p in person_dir.iterdir() if _PHOTO_NAME_RE.match(p.name)
         )
@@ -90,7 +95,22 @@ def save_photo(
     ok, buf = cv2.imencode(".jpg", image)
     if not ok:
         raise EnrollmentError("no se pudo codificar la imagen")
-    (person_dir / name).write_bytes(bytes(buf))
+    # Mismo patrón que write_settings: tempfile en el propio directorio +
+    # fsync + os.replace, para que un corte de luz o una conexión perdida a
+    # mitad de escritura jamás deje un JPEG truncado en la galería.
+    fd, tmp = tempfile.mkstemp(dir=str(person_dir), prefix=".photo-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(bytes(buf))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, person_dir / name)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     return name
 
 

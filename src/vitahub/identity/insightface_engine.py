@@ -27,9 +27,12 @@ class InsightFaceEngine(FaceEngine):
 
         # InsightFace imprime a stdout al cargar los ONNX ("find model:",
         # "Applied providers:", "set det-size:") y stdout es el flujo de
-        # eventos JSON-lines. Redirigir aquí es seguro porque from_weights
-        # corre en el arranque, antes de que exista ningún hilo de cámara
-        # (redirect_stdout cambia sys.stdout para TODO el proceso).
+        # eventos JSON-lines. from_weights puede correr de forma perezosa
+        # (primera foto subida en el admin, con hilos de cámara ya vivos), así
+        # que esta redirección SÍ cambia sys.stdout para todo el proceso
+        # mientras dura la carga. Que eso no descarrile eventos depende de
+        # StdoutJsonSink: captura su stream en __init__, no en cada emit(), así
+        # que el redirect de aquí no puede desviarlos.
         with contextlib.redirect_stdout(sys.stderr):
             app = FaceAnalysis(
                 name="buffalo_s",

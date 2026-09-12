@@ -1,6 +1,9 @@
 """Subconjunto curado de hub.yaml editable por el técnico.
 
-Solo tres campos; el resto del fichero se preserva byte a byte en estructura.
+Solo tres campos; el resto del fichero sobrevive con su misma estructura de
+claves y valores (y su orden), pero NO byte a byte: al pasar por
+yaml.safe_load + yaml.safe_dump se pierden los comentarios y el formato
+original (indentación, estilo de listas, etc.).
 La candidata pasa por el load_config real antes de escribir: si no valida,
 el hub.yaml queda como estaba (nunca cementamos una config que impida arrancar).
 """
@@ -26,7 +29,15 @@ class AdminSettings:
 
 
 def read_settings(config_path: Path) -> AdminSettings:
-    raw = yaml.safe_load(config_path.read_text()) or {}
+    # GET /api/config y POST /api/apply corren en un hilo de petición HTTP:
+    # un hub.yaml borrado o con YAML roto no debe tirar ese hilo con un
+    # traceback, sino contestar un 400 legible.
+    try:
+        raw = yaml.safe_load(config_path.read_text()) or {}
+    except OSError as exc:
+        raise ConfigError(f"no se puede leer {config_path}: {exc}") from exc
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"{config_path} no es YAML válido: {exc}") from exc
     if not isinstance(raw, dict):
         raise ConfigError(f"{config_path} no es un mapping YAML")
     inference = raw.get("inference") or {}
@@ -82,4 +93,13 @@ def validate_apply(settings: AdminSettings, people: list[PersonSummary]) -> None
     if not any(p.photos for p in people):
         raise ConfigError(
             "identity.enabled requiere al menos una persona enrolada con una foto"
+        )
+    # load_gallery revienta al arrancar con CUALQUIER carpeta de persona sin
+    # fotos válidas (gallery.py), no solo cuando no hay ninguna: si se borra
+    # la última foto de una persona, la carpeta vacía queda ahí y el hub
+    # entra en bucle de reinicio con restart: unless-stopped.
+    if any(not p.photos for p in people):
+        raise ConfigError(
+            "identity.enabled: hay una persona enrolada sin fotos — bórrala o "
+            "añádele al menos una foto antes de aplicar"
         )

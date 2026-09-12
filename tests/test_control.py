@@ -428,6 +428,43 @@ def test_config_invalid_combo_is_400(admin_server):
     assert "fall" in json.loads(body)["error"]
 
 
+def test_put_config_garbage_content_length_is_400(admin_server):
+    base, _ = admin_server()
+    req = urllib.request.Request(
+        f"{base}/api/config", method="PUT",
+        data=json.dumps({
+            "fall_enabled": True, "identity_enabled": False, "match_threshold": 0.4,
+        }).encode(),
+    )
+    req.add_header("Authorization", "Bearer secreto")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Content-Length", "no-es-un-numero")
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        urllib.request.urlopen(req, timeout=5)
+    assert exc.value.code == 400
+
+
+def test_post_photo_garbage_content_length_is_400(admin_server):
+    base, _ = admin_server()
+    req = urllib.request.Request(
+        f"{base}/api/people/maria/photos", method="POST", data=_jpeg_bytes(),
+    )
+    req.add_header("Authorization", "Bearer secreto")
+    req.add_header("Content-Type", "image/jpeg")
+    req.add_header("Content-Length", "no-es-un-numero")
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        urllib.request.urlopen(req, timeout=5)
+    assert exc.value.code == 400
+
+
+def test_get_config_missing_file_is_400(admin_server, tmp_path):
+    base, _ = admin_server()
+    (tmp_path / "hub.yaml").unlink()
+    status, body = _request(f"{base}/api/config", token="secreto")
+    assert status == 400
+    assert "error" in json.loads(body)
+
+
 def test_config_bad_json_is_400(admin_server):
     base, _ = admin_server()
     status, _body = _request(
@@ -452,6 +489,105 @@ def test_apply_identity_without_people_is_400(admin_server):
     }).encode()
     _request(f"{base}/api/config", method="PUT", token="secreto",
              data=payload, content_type="application/json")
+    status, _body = _request(f"{base}/api/apply", method="POST", token="secreto")
+    assert status == 400
+    assert shutdowns == []
+
+
+def _enable_identity(base):
+    payload = json.dumps({
+        "fall_enabled": True, "identity_enabled": True, "match_threshold": 0.4,
+    }).encode()
+    status, _body = _request(
+        f"{base}/api/config", method="PUT", token="secreto",
+        data=payload, content_type="application/json",
+    )
+    assert status == 200
+
+
+def test_delete_only_photo_is_409_when_identity_enabled(admin_server):
+    base, _ = admin_server()
+    _request(
+        f"{base}/api/people/maria/photos", method="POST", token="secreto",
+        data=_jpeg_bytes(), content_type="image/jpeg",
+    )
+    _enable_identity(base)
+
+    status, body = _request(
+        f"{base}/api/people/maria/photos/001.jpg", method="DELETE", token="secreto"
+    )
+    assert status == 409
+    assert "identidad" in json.loads(body)["error"].lower()
+
+    # La foto sigue en disco: el borrado NO se ejecutó.
+    status, _body = _request(
+        f"{base}/api/people/maria/photos/001.jpg", token="secreto"
+    )
+    assert status == 200
+
+
+def test_delete_only_person_is_409_when_identity_enabled(admin_server):
+    base, _ = admin_server()
+    _request(
+        f"{base}/api/people/maria/photos", method="POST", token="secreto",
+        data=_jpeg_bytes(), content_type="image/jpeg",
+    )
+    _enable_identity(base)
+
+    status, body = _request(f"{base}/api/people/maria", method="DELETE", token="secreto")
+    assert status == 409
+    assert "identidad" in json.loads(body)["error"].lower()
+
+    status, body = _request(f"{base}/api/people", token="secreto")
+    assert json.loads(body) == {"people": [{"id": "maria", "photos": ["001.jpg"]}]}
+
+
+def test_delete_leaving_another_person_photoless_is_409(admin_server):
+    base, _ = admin_server()
+    _request(
+        f"{base}/api/people/maria/photos", method="POST", token="secreto",
+        data=_jpeg_bytes(), content_type="image/jpeg",
+    )
+    # juan queda sin fotos tras este borrado si se permitiera.
+    _request(
+        f"{base}/api/people/juan/photos", method="POST", token="secreto",
+        data=_jpeg_bytes(), content_type="image/jpeg",
+    )
+    _enable_identity(base)
+
+    status, _body = _request(
+        f"{base}/api/people/juan/photos/001.jpg", method="DELETE", token="secreto"
+    )
+    assert status == 409
+
+
+def test_delete_photo_succeeds_when_identity_disabled(admin_server):
+    base, _ = admin_server()
+    _request(
+        f"{base}/api/people/maria/photos", method="POST", token="secreto",
+        data=_jpeg_bytes(), content_type="image/jpeg",
+    )
+    # identity_enabled sigue en su valor por defecto (False) en la fixture.
+    status, _body = _request(
+        f"{base}/api/people/maria/photos/001.jpg", method="DELETE", token="secreto"
+    )
+    assert status == 200
+
+
+def test_apply_after_emptying_person_dir_is_400(admin_server):
+    # Cementaría un boot-loop: la carpeta de maria queda vacía tras el borrado
+    # (delete_photo no la elimina) y load_gallery revienta con ella al arrancar.
+    base, shutdowns = admin_server()
+    _request(
+        f"{base}/api/people/maria/photos", method="POST", token="secreto",
+        data=_jpeg_bytes(), content_type="image/jpeg",
+    )
+    status, _body = _request(
+        f"{base}/api/people/maria/photos/001.jpg", method="DELETE", token="secreto"
+    )
+    assert status == 200  # identidad apagada: el borrado en sí no está bloqueado
+
+    _enable_identity(base)
     status, _body = _request(f"{base}/api/apply", method="POST", token="secreto")
     assert status == 400
     assert shutdowns == []

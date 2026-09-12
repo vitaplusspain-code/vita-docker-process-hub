@@ -14,6 +14,7 @@ from typing import Any, Protocol
 from vitahub.admin.config_edit import AdminSettings, read_settings, validate_apply, write_settings
 from vitahub.admin.enrollment import (
     EnrollmentError,
+    PersonSummary,
     delete_person,
     delete_photo,
     list_people,
@@ -39,6 +40,54 @@ _PERSON_RE = re.compile(r"^/api/people/([^/]+)$")
 
 class _Rescannable(Protocol):
     def run_once(self) -> RescanResult: ...
+
+
+def _parse_content_length(raw: str | None) -> int | None:
+    """None si la cabecera falta o es basura: un cliente en la WiFi puede
+    mandar cualquier cosa y un ValueError sin capturar aquí tira el hilo de
+    la petición con un traceback en vez de un 400."""
+    try:
+        return int(raw or 0)
+    except ValueError:
+        return None
+
+
+def _identity_conflict_after_delete(
+    admin: AdminContext, person_id: str, photo: str | None
+) -> str | None:
+    """None si el borrado es seguro; si no, el mensaje de error a devolver.
+
+    La config ESCRITA (no la propuesta en el formulario) es la que arrancará
+    en el próximo reinicio: si tiene identity_enabled, simulamos el borrado
+    sobre el listado actual y reutilizamos validate_apply para saber si el
+    hub quedaría en un estado que load_gallery rechaza al arrancar. Un
+    hub.yaml ilegible se trata como identidad apagada — ese problema ya lo
+    reporta /api/config, no hay que bloquear un borrado por él.
+    """
+    try:
+        settings = read_settings(admin.config_path)
+    except ConfigError:
+        return None
+    if not settings.identity_enabled:
+        return None
+    simulated = []
+    for p in list_people(admin.faces_dir):
+        if p.id != person_id:
+            simulated.append(p)
+        elif photo is not None:
+            simulated.append(
+                PersonSummary(id=p.id, photos=[ph for ph in p.photos if ph != photo])
+            )
+        # si photo es None se borra la persona entera: no se añade a simulated.
+    try:
+        validate_apply(settings, simulated)
+    except ConfigError:
+        return (
+            "no se puede borrar: la identidad está activada y esto dejaría el "
+            "reconocimiento facial sin poder arrancar — desactívala en "
+            "Configuración o enrola otra foto antes de borrar"
+        )
+    return None
 
 
 @dataclass
@@ -136,7 +185,10 @@ def _build_handler(
             if not self._authorized():
                 self._respond(401)
                 return
-            length = int(self.headers.get("Content-Length") or 0)
+            length = _parse_content_length(self.headers.get("Content-Length"))
+            if length is None:
+                self._respond(400, {"error": "cabecera Content-Length inválida"})
+                return
             try:
                 raw = json.loads(self.rfile.read(length))
                 settings = AdminSettings(
@@ -166,7 +218,10 @@ def _build_handler(
                 self._respond(401)
                 return
             if m := _PHOTOS_RE.match(self.path):
-                length = int(self.headers.get("Content-Length") or 0)
+                length = _parse_content_length(self.headers.get("Content-Length"))
+                if length is None:
+                    self._respond(400, {"error": "cabecera Content-Length inválida"})
+                    return
                 if length <= 0:
                     self._respond(400, {"error": "cuerpo vacío"})
                     return
@@ -212,16 +267,26 @@ def _build_handler(
                 self._respond(401)
                 return
             if m := _PHOTO_RE.match(self.path):
+                person_id, photo = m.group(1), m.group(2)
+                conflict = _identity_conflict_after_delete(admin, person_id, photo)
+                if conflict is not None:
+                    self._respond(409, {"error": conflict})
+                    return
                 try:
-                    delete_photo(admin.faces_dir, m.group(1), m.group(2))
+                    delete_photo(admin.faces_dir, person_id, photo)
                 except EnrollmentError as err:
                     self._respond(err.status, {"error": err.message})
                     return
                 self._respond(200, {})
                 return
             if m := _PERSON_RE.match(self.path):
+                person_id = m.group(1)
+                conflict = _identity_conflict_after_delete(admin, person_id, None)
+                if conflict is not None:
+                    self._respond(409, {"error": conflict})
+                    return
                 try:
-                    delete_person(admin.faces_dir, m.group(1))
+                    delete_person(admin.faces_dir, person_id)
                 except EnrollmentError as err:
                     self._respond(err.status, {"error": err.message})
                     return

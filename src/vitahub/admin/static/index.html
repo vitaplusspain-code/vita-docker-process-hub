@@ -89,7 +89,10 @@ async function refreshPeople() {
   for (const p of data.people) {
     const div = document.createElement("div");
     div.className = "person";
-    div.innerHTML = `<strong>${p.id}</strong> (${p.photos.length} fotos)`;
+    const strong = document.createElement("strong");
+    strong.textContent = p.id; // textContent, no innerHTML: p.id es dato del servidor.
+    div.appendChild(strong);
+    div.appendChild(document.createTextNode(` (${p.photos.length} fotos)`));
     for (const name of p.photos) {
       const img = document.createElement("img");
       api(`/api/people/${p.id}/photos/${name}`)
@@ -167,13 +170,21 @@ $("apply").onclick = async () => {
     await api("/api/apply", { method: "POST" });
   } catch (err) { msg("No se puede aplicar: " + err.message, "error"); return; }
   msg("Reiniciando… esperando a que el hub vuelva", "ok");
+  let intentos = 0;
+  const MAX_INTENTOS = 60; // ~2 minutos a 2s por intento
   const poll = setInterval(async () => {
+    intentos++;
     try {
       const data = await (await api("/api/people")).json();
       clearInterval(poll);
       msg(`Hub reiniciado con ${data.people.length} personas enroladas ✓`, "ok");
       refreshConfig();
+      return;
     } catch (e) { /* aún reiniciando */ }
+    if (intentos >= MAX_INTENTOS) {
+      clearInterval(poll);
+      msg("El hub no vuelve — revisa 'docker logs' en el dispositivo", "error");
+    }
   }, 2000);
 };
 

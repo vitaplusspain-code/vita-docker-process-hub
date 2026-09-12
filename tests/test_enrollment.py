@@ -36,6 +36,17 @@ def test_list_people_empty_dir(tmp_path: Path) -> None:
     assert list_people(tmp_path) == []
 
 
+def test_list_people_skips_invalid_dir_names(tmp_path: Path) -> None:
+    # Una carpeta creada a mano (o con mayúsculas, espacios, etc.) que no
+    # cumple _PERSON_ID_RE no debe aparecer en la API ni en la página: nunca
+    # se podría enrolar ni borrar por esa ruta (_check_person_id la rechaza).
+    (tmp_path / "María").mkdir()
+    (tmp_path / "a b").mkdir()
+    (tmp_path / "maria").mkdir()
+    (tmp_path / "maria" / "001.jpg").write_bytes(b"x")
+    assert list_people(tmp_path) == [PersonSummary(id="maria", photos=["001.jpg"])]
+
+
 def test_save_photo_creates_person_and_sequential_names(tmp_path: Path) -> None:
     engine = StubFaceEngine([[_face()], [_face()]])
     first = save_photo(tmp_path, "maria", _jpeg_bytes(), engine)
@@ -74,6 +85,18 @@ def test_save_photo_rejects_invalid_person_id(tmp_path: Path, bad_id: str) -> No
     engine = StubFaceEngine([[_face()]])
     with pytest.raises(EnrollmentError):
         save_photo(tmp_path, bad_id, _jpeg_bytes(), engine)
+
+
+def test_save_photo_leaves_no_tmp_files(tmp_path: Path) -> None:
+    # save_photo escribe vía fichero temporal + fsync + os.replace (mismo
+    # patrón que write_settings): un JPEG truncado por un corte de luz o una
+    # conexión perdida nunca debe llegar a aparecer en la galería.
+    engine = StubFaceEngine([[_face()]])
+    save_photo(tmp_path, "maria", _jpeg_bytes(), engine)
+    leftovers = list((tmp_path / "maria").glob("*.tmp")) + list(
+        (tmp_path / "maria").glob(".*")
+    )
+    assert leftovers == []
 
 
 def test_photo_bytes_roundtrip(tmp_path: Path) -> None:
