@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Protocol
 
+from vitahub.admin.config_edit import AdminSettings, read_settings, validate_apply, write_settings
 from vitahub.admin.enrollment import (
     EnrollmentError,
     delete_person,
@@ -18,6 +19,7 @@ from vitahub.admin.enrollment import (
     photo_bytes,
     save_photo,
 )
+from vitahub.config import ConfigError
 from vitahub.identity.base import FaceEngine
 from vitahub.logging_setup import get_logger, register_secret
 from vitahub.rescan import RescanResult
@@ -106,7 +108,45 @@ def _build_handler(
                     return
                 self._respond_bytes(200, data, "image/jpeg")
                 return
+            if self.path == "/api/config":
+                try:
+                    s = read_settings(admin.config_path)
+                except ConfigError as err:
+                    self._respond(400, {"error": str(err)})
+                    return
+                self._respond(200, {
+                    "fall_enabled": s.fall_enabled,
+                    "identity_enabled": s.identity_enabled,
+                    "match_threshold": s.match_threshold,
+                })
+                return
             self._respond(404)
+
+        def do_PUT(self) -> None:
+            if admin is None or self.path != "/api/config":
+                self._respond(404)
+                return
+            if not self._authorized():
+                self._respond(401)
+                return
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                raw = json.loads(self.rfile.read(length))
+                settings = AdminSettings(
+                    fall_enabled=bool(raw["fall_enabled"]),
+                    identity_enabled=bool(raw["identity_enabled"]),
+                    match_threshold=float(raw["match_threshold"]),
+                )
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                self._respond(400, {"error": "cuerpo JSON inválido: se esperan "
+                                    "fall_enabled, identity_enabled y match_threshold"})
+                return
+            try:
+                write_settings(admin.config_path, settings, admin.env)
+            except ConfigError as err:
+                self._respond(400, {"error": str(err)})
+                return
+            self._respond(200, {})
 
         def do_POST(self) -> None:
             if self.path == "/rescan":
@@ -137,6 +177,18 @@ def _build_handler(
                     self._respond(err.status, {"error": err.message})
                     return
                 self._respond(200, {"saved": saved})
+                return
+            if self.path == "/api/apply":
+                try:
+                    settings = read_settings(admin.config_path)
+                    validate_apply(settings, list_people(admin.faces_dir))
+                except ConfigError as err:
+                    self._respond(400, {"error": str(err)})
+                    return
+                # Responder ANTES de apagar: la página necesita el 200 para
+                # empezar su polling de "el hub ha vuelto".
+                self._respond(200, {"status": "reiniciando"})
+                admin.request_shutdown()
                 return
             self._respond(404)
 

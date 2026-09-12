@@ -361,3 +361,66 @@ def test_api_without_admin_context_is_404(server_factory):
     base = server_factory(_FakeService(_ok_result()))
     status, _body = _request(f"{base}/api/people", token="secreto")
     assert status == 404
+
+
+def test_config_roundtrip_over_http(admin_server):
+    base, _ = admin_server()
+    status, body = _request(f"{base}/api/config", token="secreto")
+    assert status == 200
+    assert json.loads(body) == {
+        "fall_enabled": True, "identity_enabled": False, "match_threshold": 0.4,
+    }
+
+    payload = json.dumps({
+        "fall_enabled": True, "identity_enabled": True, "match_threshold": 0.5,
+    }).encode()
+    status, _body = _request(
+        f"{base}/api/config", method="PUT", token="secreto",
+        data=payload, content_type="application/json",
+    )
+    assert status == 200
+
+    status, body = _request(f"{base}/api/config", token="secreto")
+    assert json.loads(body)["match_threshold"] == 0.5
+
+
+def test_config_invalid_combo_is_400(admin_server):
+    base, _ = admin_server()
+    payload = json.dumps({
+        "fall_enabled": False, "identity_enabled": True, "match_threshold": 0.4,
+    }).encode()
+    status, body = _request(
+        f"{base}/api/config", method="PUT", token="secreto",
+        data=payload, content_type="application/json",
+    )
+    assert status == 400
+    assert "fall" in json.loads(body)["error"]
+
+
+def test_config_bad_json_is_400(admin_server):
+    base, _ = admin_server()
+    status, _body = _request(
+        f"{base}/api/config", method="PUT", token="secreto",
+        data=b"{no json", content_type="application/json",
+    )
+    assert status == 400
+
+
+def test_apply_triggers_shutdown(admin_server):
+    base, shutdowns = admin_server()
+    status, body = _request(f"{base}/api/apply", method="POST", token="secreto")
+    assert status == 200
+    assert json.loads(body) == {"status": "reiniciando"}
+    assert shutdowns == [True]
+
+
+def test_apply_identity_without_people_is_400(admin_server):
+    base, shutdowns = admin_server()
+    payload = json.dumps({
+        "fall_enabled": True, "identity_enabled": True, "match_threshold": 0.4,
+    }).encode()
+    _request(f"{base}/api/config", method="PUT", token="secreto",
+             data=payload, content_type="application/json")
+    status, _body = _request(f"{base}/api/apply", method="POST", token="secreto")
+    assert status == 400
+    assert shutdowns == []
