@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from vitahub.config import ConfigError, HubConfig, InferenceConfig
+from vitahub.identity.base import FaceEngine
 from vitahub.identity.face_id import FaceIdentifier
 from vitahub.identity.gallery import load_gallery
 from vitahub.identity.insightface_engine import InsightFaceEngine
@@ -118,3 +119,21 @@ def build_face_identifier(cfg: HubConfig, env: Mapping[str, str]) -> FaceIdentif
     return FaceIdentifier(
         engine, gallery, match_threshold=cfg.inference.identity.match_threshold
     )
+
+
+def build_admin_engine_factory(
+    env: Mapping[str, str],
+) -> Callable[[], FaceEngine]:
+    """Factory perezosa del engine del servidor de control.
+
+    La validación de pesos corre al LLAMARLA, no al construirla: un hub sin
+    pesos faciales debe arrancar igual (la identidad puede estar apagada) y
+    el error debe salir legible en la primera subida de foto.
+    """
+
+    def _factory() -> FaceEngine:
+        root = env.get("VITAHUB_FACE_WEIGHTS", _DEFAULT_FACE_WEIGHTS)
+        _require_face_weights(root)
+        return InsightFaceEngine.from_weights(root)
+
+    return _factory

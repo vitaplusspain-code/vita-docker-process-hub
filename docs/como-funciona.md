@@ -61,7 +61,9 @@ Dos ideas de diseño que conviene retener:
 | `app.py` | Supervisor: arranque, cableado, un hilo por cámara, señales, heartbeat, apagado. |
 | `supervisor.py` | Posee los hilos de cámara: arranca, relanza y para workers en caliente. |
 | `rescan.py` | Un ciclo de rescan: descubrir → reconciliar → persistir → converger workers. |
-| `control.py` | Servidor HTTP local: `POST /rescan` autenticado con token. |
+| `control.py` | Servidor HTTP local: `POST /rescan` y, con `AdminContext`, la página `GET /` y la API `/api/*` de administración. |
+| `admin/enrollment.py` | Lógica de personas/fotos de `/api/people*` (sin HTTP): listar, guardar (valida una sola cara), leer y borrar. |
+| `admin/config_edit.py` | Subconjunto curado de `hub.yaml` editable por `/api/config`: lee/escribe `fall.enabled`, `identity.enabled`, `identity.match_threshold` validando con `load_config` antes de reemplazar el fichero. |
 | `config.py` | Carga/valida/persiste la config YAML; credencial desde entorno; *fail-fast*. |
 | `models.py` | Tipos de dominio: `Camera`, `Detection`, `Event` (con `Event.to_json()`). |
 | `discovery/onvif.py` | WS-Discovery + SOAP ONVIF: descubre cámaras y resuelve sus URIs RTSP. |
@@ -332,6 +334,36 @@ real, igual que los pesos y umbrales de caída (ver [como-probar.md](como-probar
 anónima para siempre, así que mientras esté en cámara la extracción sigue corriendo 1 vez/s por
 cámara indefinidamente; un backoff para pistas que llevan mucho sin matchear queda para más
 adelante.
+
+## Administración local (la página del técnico)
+
+`control.py` sirve, en el mismo servidor HTTP del rescan, una página estática en `GET /` (pública,
+**sin token** — es solo HTML/JS servido desde `admin/static/index.html`, no expone ningún dato) y la
+API `/api/*`, autenticada con el mismo `Bearer <VITAHUB_ADMIN_TOKEN>` que `POST /rescan`. Es una
+consola de instalación para el móvil del técnico en la WiFi del hogar, no para el usuario final — de
+ahí que viva detrás del mismo puerto de control y no exponga nada sin token salvo la página en sí.
+
+Rutas:
+
+| Ruta | Qué hace |
+|---|---|
+| `GET /api/people` | Lista personas enroladas y sus fotos. |
+| `POST /api/people/<id>/photos` | Sube una foto (JPEG/PNG, ≤10 MB); exige exactamente una cara, detectada con el mismo `FaceEngine` del hub (`build_admin_engine_factory`, perezoso: los pesos no se cargan hasta la primera subida, y un hub sin pesos instalados sigue arrancando y responde `500` legible en vez de tumbarse). |
+| `GET /api/people/<id>/photos/<foto>` | Descarga una foto. |
+| `DELETE /api/people/<id>/photos/<foto>` | Borra una foto. |
+| `DELETE /api/people/<id>` | Borra la persona entera. |
+| `GET /api/config` | Lee `fall_enabled`, `identity_enabled`, `match_threshold` de `hub.yaml`. |
+| `PUT /api/config` | Escribe esos tres campos (`admin/config_edit.py`); valida con `load_config` real **antes** de reemplazar el fichero — si no valida, `hub.yaml` queda como estaba. |
+| `POST /api/apply` | Valida la combinación (identidad encendida exige al menos una persona con una foto), responde `200` y **entonces** pide el apagado. |
+
+El ciclo de `/api/apply` es **aplicar → reinicio limpio → Docker relevanta**: primero responde
+`{"status": "reiniciando"}` (la página necesita ese `200` para empezar a sondear "¿ha vuelto el
+hub?"), y solo después llama a `request_shutdown()` — el mismo `Event` de parada que atienden
+`SIGTERM`/`SIGINT`, así que el apagado es el de siempre (control HTTP → workers → sink, ver «Salud y
+apagado» más arriba), no una ruta especial. Con `restart: unless-stopped` (`docker-compose.yml`),
+Docker relanza el contenedor, que arranca ya con el `hub.yaml` que acaba de escribir `PUT
+/api/config`. Sin Docker (arranque en local) el proceso simplemente termina — hay que volver a
+lanzarlo a mano.
 
 ## Separación stdout / stderr
 

@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 import pytest
 
+from vitahub.config import ConfigError
 from vitahub.control import AdminContext, admin_port, start_control_server
 from vitahub.identity.base import FaceObservation
 from vitahub.identity.stub import StubFaceEngine
@@ -345,6 +346,36 @@ def test_upload_invalid_image_is_400_with_message(admin_server):
     )
     assert status == 400
     assert "ilegible" in json.loads(body)["error"]
+
+
+def test_upload_with_broken_engine_factory_is_500(tmp_path: Path):
+    # La factory es perezosa (Task 6): si los pesos faltan, no revienta al
+    # construir el AdminContext sino al llamarla, en la primera subida.
+    def _broken_factory():
+        raise ConfigError("modelos de reconocimiento facial no encontrados")
+
+    ctx = AdminContext(
+        faces_dir=tmp_path / "faces",
+        config_path=tmp_path / "hub.yaml",
+        env={},
+        engine_factory=_broken_factory,
+        request_shutdown=lambda: None,
+    )
+    httpd = start_control_server(
+        _FakeService(_ok_result()), "secreto", port=0, host="127.0.0.1", admin=ctx
+    )
+    assert httpd is not None
+    try:
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        status, body = _request(
+            f"{base}/api/people/maria/photos", method="POST", token="secreto",
+            data=_jpeg_bytes(), content_type="image/jpeg",
+        )
+        assert status == 500
+        assert "no encontrados" in json.loads(body)["error"]
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
 
 
 def test_upload_too_large_is_413(admin_server):

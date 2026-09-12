@@ -179,7 +179,12 @@ def _build_handler(
                     return
                 body = self.rfile.read(length)
                 try:
-                    saved = save_photo(admin.faces_dir, m.group(1), body, _engine())
+                    engine = _engine()
+                except ConfigError as err:
+                    self._respond(500, {"error": str(err)})
+                    return
+                try:
+                    saved = save_photo(admin.faces_dir, m.group(1), body, engine)
                 except EnrollmentError as err:
                     self._respond(err.status, {"error": err.message})
                     return

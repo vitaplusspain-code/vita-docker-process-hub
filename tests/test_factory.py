@@ -187,3 +187,14 @@ def test_build_face_identifier_missing_faces_dir_raises(tmp_path):
     }
     with pytest.raises(ConfigError, match="no existe"):
         build_face_identifier(cfg, env)
+
+
+def test_admin_engine_factory_missing_weights_raises_config_error(tmp_path):
+    from vitahub.factory import build_admin_engine_factory
+
+    factory = build_admin_engine_factory(
+        {"VITAHUB_FACE_WEIGHTS": str(tmp_path / "no-existe")}
+    )
+    # Construir la factory no toca disco; llamar sí, y falla legible.
+    with pytest.raises(ConfigError):
+        factory()

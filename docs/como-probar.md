@@ -20,7 +20,7 @@ pip install -e ".[dev]"
 pytest -v
 ```
 
-Deberías ver **234 tests en verde**. Además, las mismas puertas que corren en CI:
+Deberías ver **317 tests en verde**. Además, las mismas puertas que corren en CI:
 
 ```bash
 ruff check src tests scripts
@@ -307,6 +307,51 @@ ni que la regla escriba en DynamoDB. Eso solo se comprueba contra la cuenta real
 
 ---
 
+## 5. Administración del técnico
+
+Página web local para enrolar personas y ajustar caídas/identidad sin tocar YAML ni la terminal —
+pensada para el móvil del técnico, en la WiFi del hogar, con el hub ya corriendo (§3.2 o §3.3).
+
+### 5.1 Desde el móvil
+
+```bash
+export VITAHUB_ADMIN_TOKEN=$(openssl rand -hex 32)   # antes de arrancar el hub, si no lo tenías ya
+```
+
+1. Con el móvil en la **misma WiFi** que el hub, abre `http://<ip-del-hub>:8787` en el navegador
+   (la `<ip-del-hub>` es la IP del mini-PC/Jetson en esa LAN, no la de una cámara).
+2. Mete el token (`VITAHUB_ADMIN_TOKEN`) cuando la página lo pida.
+3. **Enrolar una persona:** crea el `person_id` y sube 3–5 fotos de su cara (una cara por foto, bien
+   iluminada, de frente); la página avisa si una foto no sirve (cero o más de una cara detectada).
+4. **Ajustar caídas/identidad:** activa `fall_enabled`/`identity_enabled` y el `match_threshold`
+   (activar identidad exige al menos una persona con una foto ya enrolada).
+5. **Aplicar:** el botón Aplicar guarda `hub.yaml` y reinicia el hub limpio; la página lo avisa y
+   sondea sola hasta que el hub vuelve a responder (con Docker, `restart: unless-stopped` lo
+   relanza; en local hay que arrancarlo de nuevo a mano, ver §2).
+
+### 5.2 En local con curl
+
+Sin móvil ni WiFi de por medio, la misma API se prueba desde la terminal:
+
+```bash
+curl -H "Authorization: Bearer $VITAHUB_ADMIN_TOKEN" http://localhost:8787/api/people
+
+curl -X POST -H "Authorization: Bearer $VITAHUB_ADMIN_TOKEN" \
+  --data-binary @foto-maria.jpg \
+  http://localhost:8787/api/people/maria/photos
+
+curl -H "Authorization: Bearer $VITAHUB_ADMIN_TOKEN" http://localhost:8787/api/config
+
+curl -X POST -H "Authorization: Bearer $VITAHUB_ADMIN_TOKEN" http://localhost:8787/api/apply
+```
+
+Códigos a esperar: `401` token incorrecto o ausente, `400` foto con 0 o >1 caras (o combinación de
+config inválida), `404` persona/foto que no existe, `413` foto de más de 10 MB, `500` si faltan los
+pesos de reconocimiento facial en el hub (mensaje legible, no traceback). `GET /` (la página) no pide
+token; `/api/*` sí, siempre.
+
+---
+
 ## Diagnóstico rápido
 
 | Síntoma | Causa probable / qué mirar |
@@ -328,7 +373,7 @@ ni que la regla escriba en DynamoDB. Eso solo se comprueba contra la cuenta real
 
 ## Verificación previa a integrar (checklist)
 
-- [ ] `pytest -v` → 234 verdes.
+- [ ] `pytest -v` → 317 verdes.
 - [ ] `ruff check src tests scripts` y `mypy` limpios.
 - [ ] Arranque en seco (`stub`): descubre o avisa de 0 cámaras, sin caerse.
 - [ ] Extremo a extremo con cámara real: `person_detected` al entrar y `person_absent` al salir.

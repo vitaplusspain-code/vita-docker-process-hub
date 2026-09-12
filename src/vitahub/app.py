@@ -13,9 +13,15 @@ from vitahub.analytics.event_engine import EventEngine
 from vitahub.analytics.fall_engine import FallEngine
 from vitahub.analytics.tracker import Tracker
 from vitahub.config import ConfigError, load_config
-from vitahub.control import admin_port, start_control_server
+from vitahub.control import AdminContext, admin_port, start_control_server
 from vitahub.discovery.onvif import discover
-from vitahub.factory import build_detector, build_face_identifier, build_sink
+from vitahub.factory import (
+    _DEFAULT_FACES_DIR,
+    build_admin_engine_factory,
+    build_detector,
+    build_face_identifier,
+    build_sink,
+)
 from vitahub.ingest.rtsp import (
     backoff_delay,
     is_stalled,
@@ -101,7 +107,16 @@ def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
     if result.status == "ok" and result.found == 0:
         _log.warning("descubrimiento: 0 cámaras encontradas — revisa ONVIF/credencial/red")
 
-    httpd = _start_control_server_safe(service, env.get("VITAHUB_ADMIN_TOKEN", ""), admin_port(env))
+    admin_ctx = AdminContext(
+        faces_dir=Path(env.get("VITAHUB_FACES_DIR", _DEFAULT_FACES_DIR)),
+        config_path=config_path,
+        env=env,
+        engine_factory=build_admin_engine_factory(env),
+        request_shutdown=stop.set,
+    )
+    httpd = _start_control_server_safe(
+        service, env.get("VITAHUB_ADMIN_TOKEN", ""), admin_port(env), admin_ctx
+    )
 
     # En su propio hilo: si el rescan compartiera hilo con el heartbeat, un
     # discover() lento dejaría de latir y el contenedor quedaría marcado
@@ -150,7 +165,7 @@ def _shutdown(
 
 
 def _start_control_server_safe(
-    service: RescanService, token: str, port: int
+    service: RescanService, token: str, port: int, admin: AdminContext
 ) -> ThreadingHTTPServer | None:
     """Arranca el servidor de control sin tumbar el hub si el puerto está ocupado.
 
@@ -159,7 +174,7 @@ def _start_control_server_safe(
     el arranque.
     """
     try:
-        return start_control_server(service, token, port)
+        return start_control_server(service, token, port, admin=admin)
     except OSError as exc:
         _log.warning(
             "control HTTP no disponible (puerto %d ocupado o inaccesible): %s — "
