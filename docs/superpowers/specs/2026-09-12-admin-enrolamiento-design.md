@@ -67,15 +67,16 @@ Tres piezas, HTTP fino que delega en lógica pura:
 |---|---|
 | `GET /api/people` | Personas enroladas: `[{id, photos: [nombre...]}]` |
 | `GET /api/people/<id>/photos/<n>` | La foto (miniaturas en la UI) |
-| `POST /api/people/<id>/photos` | Sube una foto (multipart); crea la persona si no existe |
+| `POST /api/people/<id>/photos` | Sube una foto (cuerpo binario `image/*`); crea la persona si no existe |
 | `DELETE /api/people/<id>/photos/<n>` | Borra una foto |
 | `DELETE /api/people/<id>` | Borra la persona y todas sus fotos |
 | `GET /api/config` | `{fall_enabled, identity_enabled, match_threshold}` |
 | `PUT /api/config` | Escribe esos tres campos, validados; el resto del YAML intacto |
 | `POST /api/apply` | Validación final → 200 "reiniciando" → apagado limpio |
 
-Todas las rutas exigen el token; sin `VITAHUB_ADMIN_TOKEN` el servidor sigue sin abrir puerto
-(comportamiento actual).
+Todas las rutas `/api/*` exigen el token; `GET /` (página estática, sin datos) es público — el
+navegador no puede mandar cabeceras en la navegación inicial y la página no revela nada. Sin
+`VITAHUB_ADMIN_TOKEN` el servidor sigue sin abrir puerto (comportamiento actual).
 
 ### El engine del servidor de control
 
@@ -134,7 +135,7 @@ Mismo estilo TDD del repo:
   válida, 0 caras, 2 caras, imagen ilegible, `person_id` inválido, borrados, listar.
 - `tests/test_config_edit.py` — lectura del subconjunto; escritura que preserva el resto del
   YAML (cámaras, uplink…); candidata inválida no escribe nada; escritura atómica.
-- `tests/test_control.py` (ampliar) — auth en todas las rutas nuevas, subida multipart, `apply`
+- `tests/test_control.py` (ampliar) — auth en todas las rutas nuevas, subida con cuerpo binario, `apply`
   dispara el apagado (shutdown falso inyectado), 404/413/400.
 
 ## 6. Decisiones tomadas en brainstorming
