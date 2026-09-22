@@ -219,6 +219,35 @@ integración del slice.
 - `scripts/download_model.py` deriva el nombre del modelo del fichero destino: con un nombre
   personalizado no resuelve. Mencionarlo en el mensaje de `_require_weights` o en el docstring.
 
+### Diferidos del slice de identidad de persona (2026-09-12)
+
+Salieron de la revisión final de `identidad-persona` (mergeada vía `process-hub`, hoy en `main`).
+Hasta ahora solo vivían fuera del repo; se escriben aquí re-verificados contra `main` el 2026-09-22.
+
+- **`insightface` / `onnxruntime` son obligatorias aunque la identidad esté apagada:** están en
+  `[project].dependencies` de `pyproject.toml`, así que se instalan siempre pese a que
+  `inference.identity.enabled` sea false por defecto. Candidato a extra opcional `[identity]`, con
+  un `ARG` de build que haga condicional el paso de descarga de modelos del `Dockerfile` — que
+  además mete `build-essential` en una imagen single-stage.
+- **La wheel de `onnxruntime` de PyPI es CPU-only en el Orin:** para GPU haría falta la wheel de
+  NVIDIA para Jetson. Sin medir; validar rendimiento real en el dispositivo antes de prometer
+  identidad en vivo. (Único punto de esta lista que no se puede comprobar leyendo el repo.)
+- **Sin backoff para pistas que nunca van a matchear:** una persona no enrolada es anónima para
+  siempre, así que `FaceIdentifier.identify` sigue extrayendo caras 1 vez/s y por cámara mientras
+  esté en plano. Está documentado como limitación en `como-funciona.md` y en el docstring de
+  `identity/face_id.py`, pero el coste no tiene tope.
+- **`match_threshold` sigue en 0.4 sin afinar** (`src/vitahub/config.py:47`). Calibrar con
+  `scripts/replay_video.py --faces` sobre vídeo real antes de encender en un hogar.
+- **`Tracker._next_id` sin lock** (`src/vitahub/analytics/tracker.py:96` y `:127`) mientras el
+  docstring promete unicidad de proceso. Mismo caso que el resto de estructuras por cámara.
+- **`FaceIdentifier._last_attempt` no olvida las cámaras dadas de baja:** el dict se indexa por
+  `camera_id` y nunca se poda, igual que `EventEngine._cameras` y `FallEngine._cameras` ya
+  anotados arriba. Conviene arreglar los tres a la vez.
+- **Spec §3 desactualizada en dos puntos** (`docs/superpowers/specs/2026-09-02-identidad-persona-design.md:81`):
+  dice que se "recorta la región de la persona" y que el tope es "un intento por segundo y por
+  pista sin identificar". El código hace lo contrario en ambos: `self._engine.extract(frame)` pasa
+  el frame entero, y la cadencia se lleva por cámara (`_last_attempt[camera_id]`), no por pista.
+
 ## Verificación pendiente en hardware real
 Las partes de red (descubrimiento ONVIF, captura RTSP) no corren en CI por diseño. Validar
 extremo-a-extremo contra una cámara real: `docker compose up` con la credencial del hogar y
