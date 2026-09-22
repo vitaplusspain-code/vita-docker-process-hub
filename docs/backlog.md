@@ -83,8 +83,9 @@ que el hub recuerde la URI. Una cámara con ONVIF estable elimina la clase enter
   claro ("pesos no encontrados en X") antes de invocar `YOLO()`.~~ — **HECHO** (slice de detección de
   caídas, 2026-08-22): `factory._require_weights` comprueba el fichero y lanza `ConfigError` con la
   ruta antes de invocar `YOLO()`; se aplica a los dos detectores (`person_yolo` y `person_pose`).
-- **Workflow obsoleto:** `.github/workflows/event-engine-ci.yml` referencia rutas inexistentes
-  (`services/event-engine`, `tests/event_engine`) — candidato a limpieza.
+- ~~**Workflow obsoleto:** `.github/workflows/event-engine-ci.yml` referencia rutas inexistentes
+  (`services/event-engine`, `tests/event_engine`) — candidato a limpieza.~~ — **HECHO**
+  (2026-09-22): workflow retirado; `ci.yml` cubre el paquete `src/vitahub`.
 
 ### Diferidos del slice de rescan (2026-08-17)
 
