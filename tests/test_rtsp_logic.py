@@ -1,6 +1,8 @@
 from vitahub.ingest.rtsp import (
+    MAX_BACKOFF_ATTEMPT,
     backoff_delay,
     is_stalled,
+    next_attempt,
     should_sample,
     strip_credentials,
     with_credentials,
@@ -62,3 +64,19 @@ def test_strip_then_with_credentials_roundtrip():
     limpia = strip_credentials(original)
     assert "secreto" not in limpia
     assert with_credentials(limpia, "admin", "secreto") == original
+
+
+def test_backoff_huge_attempt_returns_cap_without_overflow():
+    # Cámara caída durante horas: attempt crece sin límite (visto en el Jetson
+    # del piloto, 2026-08-22). 2**attempt no cabe en float y reventaba el worker.
+    assert backoff_delay(5000) == 30.0
+    assert backoff_delay(10**6, base=0.5, cap=7.5) == 7.5
+
+
+def test_next_attempt_saturates_at_max():
+    assert next_attempt(0) == 1
+    assert next_attempt(MAX_BACKOFF_ATTEMPT - 1) == MAX_BACKOFF_ATTEMPT
+    assert next_attempt(MAX_BACKOFF_ATTEMPT) == MAX_BACKOFF_ATTEMPT
+    assert next_attempt(10**9) == MAX_BACKOFF_ATTEMPT
+    # El tope de attempt siempre produce la espera máxima.
+    assert backoff_delay(MAX_BACKOFF_ATTEMPT) == 30.0

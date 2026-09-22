@@ -7,8 +7,29 @@ from urllib.parse import quote, urlsplit, urlunsplit
 os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
 
 
+# Con base=1 y cap=30 el tope se alcanza en attempt=5; 20 deja margen de sobra
+# para otras bases/caps sin que 2**attempt se acerque al límite de float.
+MAX_BACKOFF_ATTEMPT = 20
+
+
 def backoff_delay(attempt: int, base: float = 1.0, cap: float = 30.0) -> float:
-    return float(min(cap, base * (2**attempt)))
+    """Espera exponencial acotada por `cap`.
+
+    El exponente se acota: con la cámara caída durante horas `attempt` crece
+    sin límite y `2**attempt` deja de caber en float (OverflowError que
+    tumbaba el hilo de cámara en el Jetson del piloto).
+    """
+    exponent = min(max(attempt, 0), MAX_BACKOFF_ATTEMPT)
+    return float(min(cap, base * (2.0**exponent)))
+
+
+def next_attempt(attempt: int) -> int:
+    """Incrementa el contador de reintentos saturando en MAX_BACKOFF_ATTEMPT.
+
+    Una vez alcanzado el tope la espera ya no cambia, así que no tiene sentido
+    que el contador siga creciendo indefinidamente.
+    """
+    return min(attempt + 1, MAX_BACKOFF_ATTEMPT)
 
 
 def should_sample(last_sample_t: float, now: float, sample_fps: float) -> bool:

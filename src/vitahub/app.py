@@ -25,6 +25,7 @@ from vitahub.factory import (
 from vitahub.ingest.rtsp import (
     backoff_delay,
     is_stalled,
+    next_attempt,
     open_capture,
     should_sample,
 )
@@ -222,7 +223,7 @@ def _camera_loop(  # type: ignore[no-untyped-def]
                 delay = backoff_delay(attempt)
                 _log.warning("cam %s no abre, reintento en %.0fs", camera.id, delay)
                 _emit_all(sink, monitor.on_failed(camera, time.monotonic()))
-                attempt += 1
+                attempt = next_attempt(attempt)
                 stop.wait(delay)
                 continue
             _log.info("cam %s conectada", camera.id)
@@ -265,7 +266,7 @@ def _camera_loop(  # type: ignore[no-untyped-def]
             _log.exception("cam %s error de conexión, reconecto", camera.id)
             _emit_all(sink, monitor.on_failed(camera, time.monotonic()))
             delay = backoff_delay(attempt)
-            attempt += 1
+            attempt = next_attempt(attempt)
             stop.wait(delay)
         finally:
             if cap is not None:
