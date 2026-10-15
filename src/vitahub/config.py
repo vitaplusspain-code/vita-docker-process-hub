@@ -10,6 +10,7 @@ from pathlib import Path
 import yaml
 
 from vitahub.ingest.rtsp import strip_credentials
+from vitahub.live.token import SessionKeyError, load_session_keys
 from vitahub.models import Camera
 
 
@@ -79,6 +80,20 @@ class UplinkConfig:
 
 
 @dataclass
+class LiveConfig:
+    enabled: bool = False
+    max_viewers: int = 3
+    max_fps: float = 15.0
+    region: str = "eu-west-1"
+    # kid -> PEM. Se guardan los PEM (no los objetos clave) para que la config
+    # siga siendo datos planos; `load_config` ya los ha validado.
+    session_keys: dict[str, str] = field(default_factory=dict)
+    credentials_endpoint: str = ""
+    role_alias: str = ""
+    channel_prefix: str = ""
+
+
+@dataclass
 class HubConfig:
     hub_id: str
     discovery: DiscoveryConfig
@@ -86,6 +101,7 @@ class HubConfig:
     cameras: list[Camera]
     credentials: Credentials
     uplink: UplinkConfig = field(default_factory=UplinkConfig)
+    live: LiveConfig = field(default_factory=LiveConfig)
 
 
 def _credentials_from_env(env: Mapping[str, str]) -> Credentials:
@@ -178,6 +194,94 @@ def _uplink_from_raw(raw: Mapping[str, object], env: Mapping[str, str]) -> Uplin
         ca_path=paths["ca_path"],
         cert_path=paths["cert_path"],
         key_path=paths["key_path"],
+    )
+
+
+# KVS admite hasta 10 viewers por canal; por encima de eso la señalización los
+# rechaza igualmente, pero con un error opaco en vez de `closed:limit`.
+_KVS_MAX_VIEWERS = 10
+
+
+def _live_from_raw(
+    raw: object, env: Mapping[str, str], uplink: UplinkConfig, hub_id: str
+) -> LiveConfig:
+    """Lee la sección `live`. Mismo criterio fail-fast que `_uplink_from_raw`.
+
+    El técnico que activa el directo está delante del Jetson: una clave mal
+    pegada o una variable que falta debe parar el arranque con un mensaje que
+    diga qué arreglar, no dejar un hogar donde el botón "Ver cámaras" falla
+    siempre sin explicación.
+    """
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ConfigError("Sección 'live' debe ser un mapping YAML")
+    enabled = bool(raw.get("enabled", False))
+    try:
+        max_viewers = int(raw.get("max_viewers", 3))
+    except (ValueError, TypeError) as exc:
+        raise ConfigError("Campo 'live.max_viewers' no es un entero") from exc
+    if not 1 <= max_viewers <= _KVS_MAX_VIEWERS:
+        raise ConfigError(f"Campo 'live.max_viewers' debe estar entre 1 y {_KVS_MAX_VIEWERS}")
+    try:
+        max_fps = float(raw.get("max_fps", 15))
+    except (ValueError, TypeError) as exc:
+        raise ConfigError("Campo 'live.max_fps' no es numérico") from exc
+    if not 1 <= max_fps <= 30:
+        raise ConfigError("Campo 'live.max_fps' debe estar entre 1 y 30")
+    region = raw.get("region", "eu-west-1")
+    if not isinstance(region, str) or not region:
+        raise ConfigError("Campo 'live.region' debe ser una cadena no vacía")
+    if not enabled:
+        return LiveConfig(enabled=False, max_viewers=max_viewers, max_fps=max_fps, region=region)
+
+    if not uplink.enabled:
+        raise ConfigError(
+            "live.enabled requiere 'uplink.enabled: true': el directo obtiene sus "
+            "credenciales AWS con el certificado del uplink"
+        )
+    if ":" in hub_id:
+        # _HUB_ID_RE admite ':' porque IoT lo admite en el thing; el nombre de
+        # canal KVS (<prefijo>-<hub_id>) no. Solo importa con el directo activo.
+        raise ConfigError(
+            f"live.enabled requiere un 'hub_id' sin ':' (recibido: {hub_id!r}): "
+            "los nombres de canal de KVS no lo admiten"
+        )
+    keys_raw = raw.get("session_keys")
+    if not isinstance(keys_raw, dict) or not keys_raw:
+        raise ConfigError(
+            "live.enabled es true pero 'live.session_keys' está vacío — pega la clave "
+            "que imprime scripts/live-public-key.sh del repo de arquitectura"
+        )
+    session_keys = {str(k): str(v) for k, v in keys_raw.items()}
+    try:
+        load_session_keys(session_keys)
+    except SessionKeyError as exc:
+        raise ConfigError(f"live.session_keys: {exc}") from exc
+
+    env_values: dict[str, str] = {}
+    for var in (
+        "VITAHUB_IOT_CREDENTIALS_ENDPOINT",
+        "VITAHUB_LIVE_ROLE_ALIAS",
+        "VITAHUB_LIVE_CHANNEL_PREFIX",
+    ):
+        value = env.get(var, "")
+        if not value:
+            raise ConfigError(
+                f"live.enabled es true pero falta la variable de entorno {var} "
+                "(la imprime scripts/provision-hub.sh del repo de arquitectura)"
+            )
+        env_values[var] = value
+
+    return LiveConfig(
+        enabled=True,
+        max_viewers=max_viewers,
+        max_fps=max_fps,
+        region=region,
+        session_keys=session_keys,
+        credentials_endpoint=env_values["VITAHUB_IOT_CREDENTIALS_ENDPOINT"],
+        role_alias=env_values["VITAHUB_LIVE_ROLE_ALIAS"],
+        channel_prefix=env_values["VITAHUB_LIVE_CHANNEL_PREFIX"],
     )
 
 
@@ -296,6 +400,7 @@ def load_config(path: Path, env: Mapping[str, str]) -> HubConfig:
 
     detector = str(inf_raw.get("detector", "person_yolo"))
     fall = _fall_from_raw(inf_raw.get("fall"), detector)
+    uplink = _uplink_from_raw(up_raw, env)
     return HubConfig(
         hub_id=hub_id,
         discovery=DiscoveryConfig(interval_seconds=interval_seconds),
@@ -309,7 +414,8 @@ def load_config(path: Path, env: Mapping[str, str]) -> HubConfig:
         ),
         cameras=_cameras_from_raw(raw.get("cameras") or []),
         credentials=credentials,
-        uplink=_uplink_from_raw(up_raw, env),
+        uplink=uplink,
+        live=_live_from_raw(raw.get("live"), env, uplink, hub_id),
     )
 
 

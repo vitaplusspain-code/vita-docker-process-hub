@@ -19,6 +19,15 @@ uplink:
 # Con enabled: true hacen falta además estas variables de entorno:
 #   VITAHUB_IOT_ENDPOINT  (lo imprime provision-hub.sh del repo de arquitectura)
 #   VITAHUB_IOT_CA / VITAHUB_IOT_CERT / VITAHUB_IOT_KEY  (por defecto en /data/certs/)
+live:
+  enabled: false            # true para el vídeo en directo desde la app (requiere uplink.enabled)
+  max_viewers: 3            # visores simultáneos como máximo (1-10); cada uno es un flujo de subida
+  max_fps: 15               # fps máximos del directo
+  region: eu-west-1
+  session_keys: {}          # kid -> clave pública PEM; la imprime scripts/live-public-key.sh
+# Con enabled: true hacen falta además estas variables de entorno:
+#   VITAHUB_IOT_CREDENTIALS_ENDPOINT, VITAHUB_LIVE_ROLE_ALIAS, VITAHUB_LIVE_CHANNEL_PREFIX
+#   (las imprime provision-hub.sh del repo de arquitectura)
 cameras: []                 # se autopobla al descubrir; editable a mano
 # Nota: tras el primer descubrimiento el hub reescribe este fichero (sección cameras);
 # los comentarios pueden perderse. Edita a mano solo con el hub parado.

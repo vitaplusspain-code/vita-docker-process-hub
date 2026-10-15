@@ -439,3 +439,101 @@ def test_identity_threshold_not_numeric(tmp_path):
     )
     with pytest.raises(ConfigError, match="match_threshold"):
         load_config(path, ENV)
+
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+
+_LIVE_PEM = (
+    ec.generate_private_key(ec.SECP256R1())
+    .public_key()
+    .public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+    .decode()
+)
+
+
+def _live_yaml(live_block: str, uplink: bool = True) -> str:
+    up = "uplink:\n  enabled: true\n" if uplink else ""
+    return VALID_YAML + up + live_block
+
+
+def _live_block(**over: str) -> str:
+    pem = "\n".join("      " + line for line in _LIVE_PEM.strip().splitlines())
+    fields = {"enabled": "true", "max_viewers": "3", "max_fps": "15"} | over
+    body = "".join(f"  {k}: {v}\n" for k, v in fields.items())
+    return f"live:\n{body}  session_keys:\n    k1: |\n{pem}\n"
+
+
+def _live_env(tmp_path: Path) -> dict[str, str]:
+    env = _certs(tmp_path)
+    env["VITAHUB_IOT_CREDENTIALS_ENDPOINT"] = "abc.credentials.iot.eu-west-1.amazonaws.com"
+    env["VITAHUB_LIVE_ROLE_ALIAS"] = "vita-dev-hub-live"
+    env["VITAHUB_LIVE_CHANNEL_PREFIX"] = "vita-dev-live"
+    return env
+
+
+def test_live_disabled_by_default(tmp_path):
+    cfg = load_config(_write(tmp_path, VALID_YAML), ENV)
+    assert cfg.live.enabled is False
+
+
+def test_live_enabled_loads(tmp_path):
+    cfg = load_config(_write(tmp_path, _live_yaml(_live_block())), _live_env(tmp_path))
+    assert cfg.live.enabled is True
+    assert cfg.live.max_viewers == 3
+    assert cfg.live.max_fps == 15.0
+    assert cfg.live.region == "eu-west-1"
+    assert list(cfg.live.session_keys) == ["k1"]
+    assert cfg.live.channel_prefix == "vita-dev-live"
+
+
+def test_live_requires_uplink(tmp_path):
+    # El hub saca las credenciales AWS del certificado del uplink: sin uplink
+    # no hay certificado sembrado y el directo no podría autenticarse.
+    with pytest.raises(ConfigError, match="uplink"):
+        load_config(_write(tmp_path, _live_yaml(_live_block(), uplink=False)), _live_env(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "var",
+    ["VITAHUB_IOT_CREDENTIALS_ENDPOINT", "VITAHUB_LIVE_ROLE_ALIAS", "VITAHUB_LIVE_CHANNEL_PREFIX"],
+)
+def test_live_requires_env(tmp_path, var):
+    env = _live_env(tmp_path)
+    del env[var]
+    with pytest.raises(ConfigError, match=var):
+        load_config(_write(tmp_path, _live_yaml(_live_block())), env)
+
+
+def test_live_requires_session_keys(tmp_path):
+    block = "live:\n  enabled: true\n"
+    with pytest.raises(ConfigError, match="session_keys"):
+        load_config(_write(tmp_path, _live_yaml(block)), _live_env(tmp_path))
+
+
+def test_live_rejects_bad_pem(tmp_path):
+    block = "live:\n  enabled: true\n  session_keys:\n    k1: basura\n"
+    with pytest.raises(ConfigError, match="k1"):
+        load_config(_write(tmp_path, _live_yaml(block)), _live_env(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "field,value", [("max_viewers", "0"), ("max_viewers", "11"), ("max_fps", "0"), ("max_fps", "31"),
+                    ("max_viewers", "tres")],
+)
+def test_live_rejects_out_of_range(tmp_path, field, value):
+    with pytest.raises(ConfigError, match=field):
+        load_config(_write(tmp_path, _live_yaml(_live_block(**{field: value}))), _live_env(tmp_path))
+
+
+def test_live_rejects_colon_in_hub_id(tmp_path):
+    # IoT admite ':' en el nombre del thing, KVS no en el del canal: un hub así
+    # nunca podría abrir su canal. Mejor saberlo en la instalación.
+    text = _live_yaml(_live_block()).replace("hub_id: hub-3f9a", "hub_id: hub:3f9a")
+    with pytest.raises(ConfigError, match="':'"):
+        load_config(_write(tmp_path, text), _live_env(tmp_path))
+
+
+def test_live_section_must_be_mapping(tmp_path):
+    with pytest.raises(ConfigError, match="live"):
+        load_config(_write(tmp_path, VALID_YAML + "live: [1]\n"), ENV)
