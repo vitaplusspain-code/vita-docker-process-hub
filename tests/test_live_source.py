@@ -1,5 +1,6 @@
 import asyncio
 import fractions
+import itertools
 import threading
 
 import pytest
@@ -13,6 +14,7 @@ from vitahub.live.source import (
     LiveTarget,
     SourcePool,
     SourceUnavailable,
+    SwitchTrack,
     live_targets,
 )
 from vitahub.models import Camera
@@ -257,5 +259,96 @@ def test_double_release_is_noop():
         await asyncio.wait_for(t2.recv(), 1)
         assert tracks[0].readyState == "live"
         pool.close_all()
+
+    asyncio.run(scenario())
+
+
+class _NeverTrack(MediaStreamTrack):
+    """Fuente que nunca entrega un frame (cámara colgada)."""
+
+    kind = "video"
+
+    async def recv(self) -> VideoFrame:
+        await asyncio.Event().wait()
+        raise AssertionError("inalcanzable")
+
+
+def test_switch_track_idle_without_source():
+    async def scenario() -> None:
+        track = SwitchTrack(idle_interval_s=0.01)
+        frame = await asyncio.wait_for(track.recv(), 1)
+        assert frame.width == 320 and frame.height == 180
+        track.stop()
+
+    asyncio.run(scenario())
+
+
+def test_switch_interrupts_pending_recv_on_hung_source():
+    async def scenario() -> None:
+        track = SwitchTrack(idle_interval_s=0.01)
+        track.set_source(_NeverTrack())
+        pending = asyncio.ensure_future(track.recv())
+        await asyncio.sleep(0.05)
+        assert not pending.done()
+        fresh = _FakeTrack()
+        track.set_source(fresh)
+        frame = await asyncio.wait_for(pending, 1)
+        assert frame.width == 16 and fresh.n == 1
+        track.stop()
+
+    asyncio.run(scenario())
+
+
+def test_switch_source_death_calls_back_once_and_falls_back_to_idle():
+    async def scenario() -> None:
+        ended: list[int] = []
+        track = SwitchTrack(on_source_ended=lambda: ended.append(1), idle_interval_s=0.01)
+        track.set_source(_DyingTrack())
+        first = await asyncio.wait_for(track.recv(), 1)
+        assert first.width == 16
+        # La fuente muere: nunca se propaga, sigue el negro.
+        for _ in range(3):
+            frame = await asyncio.wait_for(track.recv(), 1)
+            assert frame.width == 320
+        assert ended == [1]
+        track.stop()
+
+    asyncio.run(scenario())
+
+
+def test_switch_track_pts_monotonic_across_switches():
+    class _Backwards(_FakeTrack):
+        async def recv(self) -> VideoFrame:
+            frame = await super().recv()
+            frame.pts = 1_000_000 - self.n  # reloj propio que va hacia atrás
+            frame.time_base = fractions.Fraction(1, 1000)
+            return frame
+
+    async def scenario() -> None:
+        track = SwitchTrack(idle_interval_s=0.01)
+        pts = [(await track.recv()).pts]
+        track.set_source(_Backwards())
+        pts += [(await track.recv()).pts for _ in range(3)]
+        track.set_source(_FakeTrack())
+        pts += [(await track.recv()).pts for _ in range(3)]
+        track.set_source(None)
+        pts.append((await track.recv()).pts)
+        assert all(b > a for a, b in itertools.pairwise(pts))
+        track.stop()
+
+    asyncio.run(scenario())
+
+
+def test_switch_track_stop_ends_recv_without_stopping_source():
+    async def scenario() -> None:
+        source = _NeverTrack()
+        track = SwitchTrack()
+        track.set_source(source)
+        pending = asyncio.ensure_future(track.recv())
+        await asyncio.sleep(0.02)
+        track.stop()
+        with pytest.raises(MediaStreamError):
+            await asyncio.wait_for(pending, 1)
+        assert source.readyState == "live"
 
     asyncio.run(scenario())

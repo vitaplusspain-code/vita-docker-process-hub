@@ -100,6 +100,100 @@ class IdleTrack(MediaStreamTrack):  # type: ignore[misc]  # aiortc sin tipos (An
         return frame
 
 
+# Origen común a todas las SwitchTrack: el fan-out entrega el *mismo* objeto
+# frame a varios viewers y cada uno le reescribe el pts; con un reloj compartido
+# todos escriben (casi) el mismo valor y ningún emisor ve el tiempo retroceder.
+_PTS_ORIGIN = time.monotonic()
+
+
+class SwitchTrack(MediaStreamTrack):  # type: ignore[misc]  # aiortc sin tipos (Any)
+    """La pista que ve el emisor de aiortc, una por conexión: nunca cambia.
+
+    `replaceTrack` no sirve para pasar de una cámara a otra: el emisor sigue
+    esperando en `recv()` de la pista vieja, y al soltarla esa espera lanza
+    `MediaStreamError`, el emisor sale de su bucle para siempre y además para
+    la pista nueva. Aquí el cambio es interno: `set_source` despierta el `recv`
+    pendiente, se cancela la lectura de la fuente vieja y se sigue con la nueva.
+    Sin fuente (o si la fuente muere) entrega negro; solo termina con `stop()`.
+    """
+
+    kind = "video"
+
+    def __init__(
+        self,
+        on_source_ended: Callable[[], None] | None = None,
+        idle_interval_s: float = 1.0,
+    ) -> None:
+        super().__init__()
+        self._on_source_ended = on_source_ended
+        self._idle = IdleTrack(interval_s=idle_interval_s)
+        self._source: MediaStreamTrack | None = None
+        self._changed = asyncio.Event()
+        self._last_pts = -1
+
+    def set_source(self, track: MediaStreamTrack | None) -> None:
+        self._source = track
+        self._changed.set()
+
+    def stop(self) -> None:
+        # Solo ella misma: la fuente es del servicio, que la devuelve al pool.
+        super().stop()
+        self._changed.set()
+
+    async def recv(self) -> VideoFrame:
+        while True:
+            if self.readyState != "live":
+                raise MediaStreamError
+            source = self._source
+            self._changed.clear()
+            reading = asyncio.ensure_future((source or self._idle).recv())
+            # Si al final se descarta, que su excepción no quede "sin recoger".
+            reading.add_done_callback(_consume)
+            waking = asyncio.ensure_future(self._changed.wait())
+            try:
+                await asyncio.wait({reading, waking}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                waking.cancel()
+                if not reading.done():
+                    reading.cancel()
+            if not reading.done() or reading.cancelled():
+                continue  # cambio de fuente o stop: se vuelve a mirar
+            try:
+                frame: VideoFrame = reading.result()
+            except Exception as exc:  # (sin noqa: re-lanza) cualquier fallo de la fuente = caída
+                if source is None:
+                    raise  # la IdleTrack no falla: si lo hace es un bug, que se vea
+                if self._source is source:
+                    _log.info("live: la fuente terminó (%s), se pasa a negro", type(exc).__name__)
+                    self._source = None
+                    self._notify_ended()
+                continue
+            return self._stamp(frame)
+
+    def _notify_ended(self) -> None:
+        if self.readyState != "live" or self._on_source_ended is None:
+            return
+        try:
+            self._on_source_ended()
+        except Exception:  # noqa: BLE001 — subiría al emisor de aiortc y lo pararía
+            _log.exception("live: error en on_source_ended")
+
+    def _stamp(self, frame: VideoFrame) -> VideoFrame:
+        # Cada fuente trae su propio reloj (pts y time_base sin relación entre
+        # cámaras): el codificador debe ver siempre un tiempo que avanza.
+        pts = int((time.monotonic() - _PTS_ORIGIN) * _VIDEO_CLOCK)
+        pts = max(pts, self._last_pts + 1)
+        self._last_pts = pts
+        frame.pts = pts
+        frame.time_base = fractions.Fraction(1, _VIDEO_CLOCK)
+        return frame
+
+
+def _consume(task: asyncio.Future[VideoFrame]) -> None:
+    if not task.cancelled():
+        task.exception()
+
+
 class _Subscriber(MediaStreamTrack):  # type: ignore[misc]  # aiortc sin tipos (Any)
     """Un viewer del fan-out: solo guarda el último frame.
 

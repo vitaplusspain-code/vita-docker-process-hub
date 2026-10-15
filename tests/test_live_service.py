@@ -4,6 +4,8 @@ from collections.abc import Callable
 
 import jwt
 from aiortc import MediaStreamTrack
+from aiortc.mediastreams import MediaStreamError
+from av import VideoFrame
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
@@ -22,6 +24,10 @@ _KEYS = load_session_keys(
     ).decode()}
 )
 _TARGETS = [LiveTarget("a", "salón", "rtsp://a"), LiveTarget("b", "cocina", "rtsp://b")]
+# "c" funciona; "d" entrega unos frames y luego la cámara muere (MediaStreamError).
+_MORE_TARGETS = [
+    *_TARGETS, LiveTarget("c", "pasillo", "rtsp://c"), LiveTarget("d", "garaje", "rtsp://d")
+]
 # URIs que el pool intentó abrir: prueba de que sin `auth` no se toca ninguna cámara.
 _OPENED: list[str] = []
 # La pista inicial (IdleTrack del peer) va a 1 fps; la de cámara a ~15 fps. Pedir
@@ -81,20 +87,48 @@ class _FakeSignaling:
         await asyncio.wait_for(viewer.opened.wait(), 10)
 
 
+class _DyingSource(IdleTrack):
+    """Cámara que se cae a mitad de directo."""
+
+    def __init__(self, frames: int) -> None:
+        super().__init__(interval_s=0.02)
+        self._left = frames
+
+    async def recv(self) -> VideoFrame:
+        if self._left <= 0:
+            raise MediaStreamError
+        self._left -= 1
+        return await super().recv()
+
+
 def _opener(uri: str) -> MediaStreamTrack:
     _OPENED.append(uri)
     if uri == "rtsp://b":
         raise OSError("cámara apagada")
+    if uri == "rtsp://d":
+        return _DyingSource(frames=20)
     return IdleTrack(interval_s=0.02)
 
 
-async def _service(max_viewers: int = 3, clock=time.time, auth_timeout_s: float = 5.0):  # type: ignore[no-untyped-def]
+class _BrokenSink(_Sink):
+    def emit(self, event: Event) -> None:
+        raise RuntimeError("uplink caído")
+
+
+async def _service(  # type: ignore[no-untyped-def]
+    max_viewers: int = 3,
+    clock=time.time,
+    auth_timeout_s: float = 5.0,
+    targets: list[LiveTarget] = _TARGETS,
+    sink: _Sink | None = None,
+):
     _OPENED.clear()
-    sig, sink, stop = _FakeSignaling(), _Sink(), asyncio.Event()
+    sig, stop = _FakeSignaling(), asyncio.Event()
+    sink = sink or _Sink()
     svc = LiveService(
         hub_id="hub-1", max_viewers=max_viewers, keys=_KEYS,
         signaling_factory=lambda: sig, sources=SourcePool(_opener, max_fps=15),
-        targets=lambda: _TARGETS, sink=sink, clock=clock,
+        targets=lambda: targets, sink=sink, clock=clock,
         auth_timeout_s=auth_timeout_s, tick_s=0.05,
     )
     task = asyncio.ensure_future(svc.run(stop))
@@ -276,6 +310,89 @@ def test_stop_sends_shutdown_and_emits_ended():
         assert sink.events[-1].payload["reason"] == "shutdown"
 
     asyncio.run(scenario())
+
+
+def test_switching_cameras_keeps_video_flowing():
+    async def scenario() -> None:
+        _, sig, sink, stop, task = await _service(targets=_MORE_TARGETS)
+        viewer = await _auth(sig, "acc-1", "v1")
+        await viewer.next()
+        for camera_id in ("a", "c", "a"):
+            baseline = viewer.frames
+            viewer.send({"type": "select", "camera_id": camera_id})
+            assert await _until(lambda b=baseline: viewer.frames > b + _CAMERA_FRAMES)
+            # Y sigue llegando: un emisor muerto tras el cambio se pararía aquí.
+            frames = viewer.frames
+            await asyncio.sleep(2.0)
+            assert viewer.frames > frames + _CAMERA_FRAMES
+        assert viewer.inbox.empty()
+        started = [e.payload["camera_id"] for e in sink.events if e.type == "live_view_started"]
+        assert started == ["a", "c", "a"]
+        stop.set()
+        await task
+
+    asyncio.run(scenario())
+
+
+def test_camera_death_notifies_and_reselect_resumes():
+    async def scenario() -> None:
+        _, sig, sink, stop, task = await _service(targets=_MORE_TARGETS)
+        viewer = await _auth(sig, "acc-1", "v1")
+        await viewer.next()
+        viewer.send({"type": "select", "camera_id": "d"})
+        assert await viewer.next() == {"type": "closed", "reason": "camera_unavailable"}
+        baseline = viewer.frames
+        viewer.send({"type": "select", "camera_id": "a"})
+        assert await _until(lambda: viewer.frames > baseline + _CAMERA_FRAMES)
+        assert not [e for e in sink.events if e.type == "live_view_ended"]
+        stop.set()
+        await task
+
+    asyncio.run(scenario())
+
+
+def test_renewal_does_not_reemit_started():
+    async def scenario() -> None:
+        _, sig, sink, stop, task = await _service()
+        viewer = await _auth(sig, "acc-1", "v1")
+        await viewer.next()
+        viewer.send({"type": "select", "camera_id": "a"})
+        assert await _until(lambda: any(e.type == "live_view_started" for e in sink.events))
+        viewer.send({"type": "auth", "token": _token("acc-1", sid="s2")})
+        assert (await viewer.next())["type"] == "ready"
+        assert [e.type for e in sink.events] == ["live_view_started"]
+        stop.set()
+        await task
+
+    asyncio.run(scenario())
+
+
+def test_failing_sink_does_not_break_auth_or_select():
+    async def scenario() -> None:
+        _, sig, _, stop, task = await _service(sink=_BrokenSink())
+        viewer = await _auth(sig, "acc-1", "v1")
+        assert (await viewer.next())["type"] == "ready"
+        baseline = viewer.frames
+        viewer.send({"type": "select", "camera_id": "a"})
+        assert await _until(lambda: viewer.frames > baseline + _CAMERA_FRAMES)
+        stop.set()
+        assert await viewer.next() == {"type": "closed", "reason": "shutdown"}
+        await asyncio.wait_for(task, 5)
+
+    asyncio.run(scenario())
+
+
+def test_stop_before_loop_exists_is_not_lost():
+    svc = LiveService(
+        hub_id="hub-1", max_viewers=3, keys=_KEYS,
+        signaling_factory=_FakeSignaling, sources=SourcePool(_opener, max_fps=15),
+        targets=lambda: _TARGETS, sink=_Sink(), tick_s=0.05,
+    )
+    svc.stop(timeout_s=0.1)  # aún no hay hilo ni loop
+    svc.start()
+    assert svc._thread is not None
+    svc._thread.join(timeout=2.0)
+    assert not svc._thread.is_alive()
 
 
 def test_start_and_stop_in_own_thread():

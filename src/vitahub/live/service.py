@@ -24,7 +24,7 @@ from vitahub.live.protocol import (
 )
 from vitahub.live.sessions import Rejected, SessionBook
 from vitahub.live.signaling import Signaling, SignalingClosed, SignalingMessage
-from vitahub.live.source import LiveTarget, SourcePool, SourceUnavailable
+from vitahub.live.source import LiveTarget, SourcePool, SourceUnavailable, SwitchTrack
 from vitahub.live.token import SessionClaims, TokenRejected, verify_token
 from vitahub.logging_setup import get_logger
 from vitahub.models import Event
@@ -44,6 +44,9 @@ class _Conn:
     # La pista exacta que dio `SourcePool.acquire`: `release` la necesita a ella,
     # no la cámara (la entrada de la cámara puede haber muerto y reabierto).
     track: MediaStreamTrack | None = None
+    # La pista fija del emisor (se crea con el primer select): los cambios de
+    # cámara pasan por ella, nunca por `replaceTrack` (ver SwitchTrack).
+    switch: SwitchTrack | None = None
     timers: list[asyncio.TimerHandle] = field(default_factory=list)
 
 
@@ -88,6 +91,8 @@ class LiveService:
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stop: asyncio.Event | None = None
+        # `stop()` puede llegar antes de que exista el loop: el aviso no se pierde.
+        self._stop_requested = threading.Event()
 
     # --- ciclo de vida ------------------------------------------------------
 
@@ -98,6 +103,8 @@ class LiveService:
             async def _run() -> None:
                 self._loop = asyncio.get_running_loop()
                 self._stop = asyncio.Event()
+                if self._stop_requested.is_set():
+                    self._stop.set()
                 ready.set()
                 await self.run(self._stop)
 
@@ -113,6 +120,7 @@ class LiveService:
         ready.wait(timeout=5.0)
 
     def stop(self, timeout_s: float = 5.0) -> None:
+        self._stop_requested.set()
         if self._loop is not None and self._stop is not None:
             try:
                 self._loop.call_soon_threadsafe(self._stop.set)
@@ -152,9 +160,11 @@ class LiveService:
             try:
                 await signaling.open()
                 _log.info("live: conectado al canal de señalización")
-                attempt = 0
                 while True:
                     msg = await signaling.recv()
+                    # El backoff se reinicia solo con un canal que de verdad
+                    # entrega: un `open` que acepta y cae al instante no cuenta.
+                    attempt = 0
                     if msg.type in ("GO_AWAY", "RECONNECT_ICE_SERVER"):
                         _log.info("live: KVS pide reconectar (%s)", msg.type)
                         break
@@ -271,6 +281,8 @@ class LiveService:
         conn = self._conns.get(conn_id)
         if claims is None or conn is None:
             return  # select antes del auth: se ignora, el plazo del auth ya corre
+        if claims.exp <= self._clock():
+            return  # caducada a falta de tick: no se abre cámara, el tick la cierra
         target = next((t for t in self._targets() if t.camera_id == msg.camera_id), None)
         if target is None:
             conn.peer.send(closed_message("camera_unavailable"))
@@ -285,10 +297,17 @@ class LiveService:
             # La conexión se cerró durante la apertura: nadie verá esta pista.
             self._sources.release(track)
             return
-        # Primero la nueva y luego soltar la vieja: el emisor nunca se queda
-        # leyendo de una pista ya parada.
+        if conn.switch is None:
+            # Una sola vez por conexión: la lectura en curso es de la IdleTrack
+            # inicial, que nunca se para, así que el emisor pasa a esta en ~1 s.
+            conn.switch = SwitchTrack(
+                on_source_ended=lambda: self._on_source_ended(conn_id),
+            )
+            conn.peer.set_track(conn.switch)
+        # Primero la nueva y luego soltar la vieja: `set_source` ya canceló la
+        # lectura pendiente de la vieja, así que pararla no llega al emisor.
         old = conn.track
-        conn.peer.set_track(track)
+        conn.switch.set_source(track)
         conn.track = track
         conn.camera = target
         if old is not None:
@@ -296,6 +315,17 @@ class LiveService:
         self._emit(
             live_view_started(self._hub_id, claims, target.camera_id, target.name, self._now())
         )
+
+    def _on_source_ended(self, conn_id: str) -> None:
+        # La cámara murió a mitad de directo: la SwitchTrack ya ha vuelto al
+        # negro. Se avisa sin cerrar (spec §3.3) y el viewer puede elegir otra.
+        conn = self._conns.get(conn_id)
+        if conn is None or conn.track is None:
+            return
+        self._sources.release(conn.track)
+        conn.track = None
+        conn.camera = None
+        conn.peer.send(closed_message("camera_unavailable"))
 
     async def _on_peer_closed(self, peer: ViewerPeer) -> None:
         await self._close(peer.conn_id, None, ended_reason="disconnected")
@@ -333,6 +363,10 @@ class LiveService:
         for timer in conn.timers:
             timer.cancel()
         claims = self._book.release(conn_id) or claims
+        if conn.switch is not None:
+            # Antes que la fuente: parada la SwitchTrack, soltar la fuente ya
+            # no se confunde con una cámara caída (no hay `camera_unavailable`).
+            conn.switch.stop()
         if conn.track is not None:
             self._sources.release(conn.track)
         if claims is not None:
