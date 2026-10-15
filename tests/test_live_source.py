@@ -2,6 +2,7 @@ import asyncio
 import fractions
 import itertools
 import threading
+import types
 
 import pytest
 from aiortc import MediaStreamTrack
@@ -417,3 +418,89 @@ def test_single_subscriber_gets_frame_without_copy():
         pool.close_all()
 
     asyncio.run(scenario())
+
+
+def _write_av_file(path: str, with_video: bool = True, frames: int = 20) -> None:
+    """Fichero con audio (y vídeo si `with_video`), como una cámara con micrófono."""
+    import av
+    import numpy as np
+    from av import AudioFrame
+
+    out = av.open(path, "w")
+    video = None
+    if with_video:
+        video = out.add_stream("mpeg4", rate=10)
+        video.width, video.height, video.pix_fmt = 64, 48, "yuv420p"
+    audio = out.add_stream("aac", rate=8000)
+    for i in range(frames):
+        if video is not None:
+            vf = VideoFrame.from_ndarray(np.zeros((48, 64, 3), dtype=np.uint8), format="bgr24")
+            vf.pts = i
+            for packet in video.encode(vf):
+                out.mux(packet)
+        af = AudioFrame.from_ndarray(
+            np.zeros((1, 1024), dtype=np.float32), format="fltp", layout="mono"
+        )
+        af.sample_rate, af.pts = 8000, i * 1024
+        for packet in audio.encode(af):
+            out.mux(packet)
+    for stream in (video, audio):
+        if stream is not None:
+            for packet in stream.encode():
+                out.mux(packet)
+    out.close()
+
+
+def test_opener_with_audio_delivers_video_frames(tmp_path):
+    # La mayoría de cámaras traen micrófono: abrir una no puede dejar la pista
+    # de vídeo inservible (antes el audio parado cerraba el contenedor).
+    from vitahub.live.source import open_rtsp_track
+
+    path = str(tmp_path / "cam.mkv")
+    _write_av_file(path)
+
+    async def scenario() -> list[VideoFrame]:
+        track = open_rtsp_track(path, format=None, options={})
+        try:
+            return [await asyncio.wait_for(track.recv(), 5) for _ in range(3)]
+        finally:
+            await asyncio.get_running_loop().run_in_executor(None, track.stop)
+
+    frames = asyncio.run(scenario())
+    assert [(f.width, f.height) for f in frames] == [(64, 48)] * 3
+
+
+def test_opener_without_video_is_unavailable(tmp_path):
+    from vitahub.live.source import open_rtsp_track
+
+    path = str(tmp_path / "solo-audio.mkv")
+    _write_av_file(path, with_video=False)
+    with pytest.raises(SourceUnavailable):
+        open_rtsp_track(path, format=None, options={})
+
+
+def test_opener_defaults_ask_rtsp_for_video_only_and_close_on_no_video(monkeypatch):
+    # El camino de producción: RTSP por TCP y sin negociar audio con la cámara.
+    import vitahub.live.source as source_mod
+
+    calls: list[tuple[str, object, object]] = []
+
+    class _Container:
+        closed = False
+        streams = types.SimpleNamespace(video=())  # imita `container.streams.video`
+
+        def close(self) -> None:
+            _Container.closed = True
+
+    def fake_open(uri, format=None, options=None):  # type: ignore[no-untyped-def]
+        calls.append((uri, format, options))
+        return _Container()
+
+    monkeypatch.setattr(source_mod.av, "open", fake_open)
+    with pytest.raises(SourceUnavailable):
+        source_mod.open_rtsp_track("rtsp://cam/sub")
+    uri, fmt, opts = calls[0]
+    assert (uri, fmt) == ("rtsp://cam/sub", "rtsp")
+    assert isinstance(opts, dict)
+    assert opts["allowed_media_types"] == "video" and opts["rtsp_transport"] == "tcp"
+    assert _Container.closed  # sin vídeo no queda una conexión RTSP abierta

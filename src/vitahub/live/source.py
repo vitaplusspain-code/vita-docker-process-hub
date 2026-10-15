@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import fractions
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+import av
+import av.container
 import numpy as np
 from aiortc import MediaStreamTrack
 from aiortc.mediastreams import MediaStreamError
@@ -390,18 +394,105 @@ class SourcePool:
             self._teardown(entry)
 
 
-def open_rtsp_track(uri: str) -> MediaStreamTrack:
-    """Runtime only. No cubierto por unit tests (requiere stream real)."""
-    from aiortc.contrib.media import MediaPlayer
+# Opciones del demuxer RTSP de ffmpeg. `allowed_media_types` hace que ni
+# siquiera se negocie el audio con la cámara (ni ancho de banda ni RTP que
+# nadie lee); `_VideoOnlyTrack` además solo decodifica el vídeo, por si una
+# cámara o un formato ignoraran la opción.
+_RTSP_OPTIONS = {"rtsp_transport": "tcp", "timeout": "5000000", "allowed_media_types": "video"}
+# Frames decodificados a la espera del bucle: el `_pump` los consume en el acto;
+# el tope solo importa si el loop se atasca, y entonces se tira lo más viejo.
+_DECODED_BACKLOG = 8
 
-    player = MediaPlayer(
-        uri, format="rtsp", options={"rtsp_transport": "tcp", "timeout": "5000000"}
-    )
-    if player.audio is not None:
-        # Nadie lee el audio y su cola es ilimitada: el worker del player la
-        # llenaría sin fin (fuga de memoria). Se para nada más abrir.
-        player.audio.stop()
-    if player.video is None:
+
+class _VideoOnlyTrack(MediaStreamTrack):  # type: ignore[misc]  # aiortc sin tipos (Any)
+    """Pista de vídeo de un contenedor de PyAV, decodificado en un hilo propio.
+
+    No se usa `MediaPlayer` de aiortc: crea también la pista de audio, cuya cola
+    es ilimitada si nadie la lee, y pararla cierra el contenedor entero (el
+    primer `recv` del vídeo fallaba con AttributeError: cámara inservible).
+    """
+
+    kind = "video"
+
+    def __init__(self, container: av.container.InputContainer, stream: av.VideoStream) -> None:
+        super().__init__()
+        self._container: av.container.InputContainer | None = container
+        self._stream = stream
+        self._queue: asyncio.Queue[VideoFrame | None] = asyncio.Queue()
+        self._quit = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+
+    async def recv(self) -> VideoFrame:
+        if self.readyState != "live":
+            raise MediaStreamError
+        if self._thread is None:
+            self._thread = threading.Thread(
+                target=self._decode, args=(asyncio.get_running_loop(),),
+                name="live-decode", daemon=True,
+            )
+            self._thread.start()
+        frame = await self._queue.get()
+        if frame is None:
+            raise MediaStreamError
+        return frame
+
+    def _decode(self, loop: asyncio.AbstractEventLoop) -> None:
+        # `stop` cierra el contenedor solo tras `join`: mientras este hilo vive, existe.
+        container = self._container
+        assert container is not None
+        try:
+            frames = container.decode(self._stream)
+            while not self._quit.is_set():
+                try:
+                    frame = next(frames)
+                except av.FFmpegError as exc:
+                    if exc.errno != errno.EAGAIN:
+                        raise
+                    # Sin datos todavía: el generador ya no sirve, se pide otro.
+                    time.sleep(0.01)
+                    frames = container.decode(self._stream)
+                    continue
+                self._deliver(loop, frame)
+        except StopIteration:
+            pass  # fin del flujo: la cámara cerró
+        except Exception as exc:  # noqa: BLE001 — cualquier fallo de ffmpeg = fuente muerta
+            _log.info("live: el decodificador terminó: %s", exc)
+        finally:
+            self._deliver(loop, None)
+
+    def _deliver(self, loop: asyncio.AbstractEventLoop, frame: VideoFrame | None) -> None:
+        def _put() -> None:
+            if frame is not None and self._queue.qsize() >= _DECODED_BACKLOG:
+                self._queue.get_nowait()
+            self._queue.put_nowait(frame)
+
+        try:
+            loop.call_soon_threadsafe(_put)
+        except RuntimeError:
+            pass  # el loop ya cerró: nadie espera ese frame
+
+    def stop(self) -> None:
+        """Para el hilo y cierra el contenedor. Bloquea hasta el timeout RTSP:
+        `SourcePool` lo llama desde el executor (ver `_stop_source`)."""
+        super().stop()
+        self._quit.set()
+        with self._lock:  # idempotente aunque se llame desde dos hilos
+            if self._thread is not None and self._thread is not threading.current_thread():
+                self._thread.join()
+            self._thread = None
+            container, self._container = self._container, None
+        if container is not None:
+            container.close()
+
+
+def open_rtsp_track(
+    uri: str, format: str | None = "rtsp", options: dict[str, str] | None = None
+) -> MediaStreamTrack:
+    """Abre la cámara y devuelve solo su vídeo. Bloquea (handshake RTSP): va al
+    executor. `format` y `options` existen para probarlo con un fichero local."""
+    container = av.open(uri, format=format, options=_RTSP_OPTIONS if options is None else options)
+    if not container.streams.video:
+        container.close()
         raise SourceUnavailable(uri)
-    track: MediaStreamTrack = player.video
-    return track
+    return _VideoOnlyTrack(container, container.streams.video[0])
