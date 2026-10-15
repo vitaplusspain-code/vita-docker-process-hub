@@ -29,7 +29,10 @@ def test_parses_select_from_bytes():
         '{"type":"select","camera_id":""}',
         '{"type":"desconocido"}',
         b"\xff\xfe",
+        # Anidado hasta agotar la pila del parser: RecursionError sin capturar.
+        "[" * 1_000_000 + "]" * 1_000_000,
     ],
+    ids=lambda raw: repr(raw)[:30],
 )
 def test_garbage_returns_none(raw):
     # Un viewer con un bug (o malicioso) no puede tumbar el peer con un mensaje raro.

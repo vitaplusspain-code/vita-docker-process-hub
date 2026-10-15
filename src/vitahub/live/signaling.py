@@ -49,13 +49,19 @@ def decode_message(raw: str | bytes) -> SignalingMessage | None:
         if not isinstance(data, dict) or not isinstance(data.get("messageType"), str):
             return None
         payload: dict[str, object] = {}
-        if data.get("messagePayload"):
-            decoded = json.loads(base64.b64decode(data["messagePayload"], validate=True))
+        raw_payload = data.get("messagePayload")
+        if raw_payload:
+            if not isinstance(raw_payload, str):
+                return None  # el contrato es base64 en texto; cualquier otra cosa se ignora
+            decoded = json.loads(base64.b64decode(raw_payload, validate=True))
             if not isinstance(decoded, dict):
                 return None
             payload = decoded
         return SignalingMessage(data["messageType"], str(data.get("senderClientId", "")), payload)
-    except (ValueError, binascii.Error, UnicodeDecodeError):
+    except (ValueError, binascii.Error, UnicodeDecodeError, TypeError, RecursionError):
+        # Lo que llega por el WSS no es de fiar: una trama rara (o JSON anidado
+        # hasta agotar la pila del parser) se descarta en vez de cortar la
+        # señalización, que reconectaría con backoff creciente.
         return None
 
 

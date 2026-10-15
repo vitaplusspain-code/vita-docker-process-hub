@@ -27,7 +27,8 @@ def parse_client_message(raw: str | bytes) -> ClientMessage | None:
     """Mensaje del viewer → tipo, o None si no es un mensaje válido del contrato."""
     try:
         data = json.loads(raw)
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        # RecursionError: JSON anidado a propósito para agotar la pila del parser.
         return None
     if not isinstance(data, dict):
         return None

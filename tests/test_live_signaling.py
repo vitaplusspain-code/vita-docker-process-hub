@@ -3,6 +3,7 @@ import base64
 import json
 from urllib.parse import parse_qs, urlsplit
 
+import pytest
 from websockets.asyncio.server import ServerConnection, serve
 
 from vitahub.live.credentials import AwsCredentials, IotCredentialsProvider
@@ -43,6 +44,29 @@ def test_decode_garbage_is_none():
     # KVS manda a veces frames vacíos (keepalive): no son errores.
     assert decode_message("") is None
     assert decode_message('{"messageType":"SDP_OFFER","messagePayload":"%%%"}') is None
+
+
+# JSON tan anidado que el parser de C agota su pila: RecursionError en
+# cualquier versión (en 3.12, la de producción, con mucha menos profundidad).
+_DEEP = "[" * 1_000_000 + "]" * 1_000_000
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # messagePayload que no es texto: b64decode lanzaba TypeError.
+        '{"messageType":"SDP_OFFER","messagePayload":5}',
+        '{"messageType":"SDP_OFFER","messagePayload":[1]}',
+        '{"messageType":"SDP_OFFER","messagePayload":{"a":1}}',
+        _DEEP,
+        json.dumps({"messageType": "SDP_OFFER",
+                    "messagePayload": base64.b64encode(_DEEP.encode()).decode()}),
+    ],
+    ids=["payload-int", "payload-list", "payload-dict", "deep", "deep-payload"],
+)
+def test_decode_hostile_input_is_none(raw):
+    # Una sola trama rara no puede tumbar la señalización (y subir el backoff).
+    assert decode_message(raw) is None
 
 
 def test_encode_answer():
