@@ -208,8 +208,13 @@ class LiveService:
 
     async def _on_offer(self, signaling: Signaling, msg: SignalingMessage) -> None:
         previous = self._by_client.get(msg.client_id)
-        if previous is not None:
-            # El mismo navegador reconectando: la conexión vieja ya no sirve.
+        if previous is not None and self._book.claims_for(previous) is None:
+            # El mismo navegador reconectando antes de autenticarse: la
+            # conexión vieja ya no sirve. Si estaba autenticada no se toca: una
+            # oferta no prueba nada (el client_id lo elige el viewer) y cortar
+            # sin `closed` ni `live_view_ended` dejaría a alguien sin vídeo.
+            # La sustituirá el `auth` de la nueva (regla 4) o morirá por ICE;
+            # solo se remapea `_by_client` a la nueva conexión, abajo.
             await self._close(previous, None)
         conn_id = uuid.uuid4().hex
         peer = ViewerPeer(

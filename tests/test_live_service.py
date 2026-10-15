@@ -424,3 +424,43 @@ def test_start_and_stop_in_own_thread():
     t0 = time.monotonic()
     svc.stop(timeout_s=5.0)
     assert time.monotonic() - t0 < 5.0
+
+
+def test_reoffer_same_client_keeps_authenticated_connection():
+    # Una SDP_OFFER con el client_id de una conexión autenticada no puede
+    # cortarla sin auth ni `closed`: la sustitución la decide el `auth` (regla 4).
+    async def scenario() -> None:
+        svc, sig, _, stop, task = await _service()
+        first = await _auth(sig, "acc-1", "v1", sid="s1")
+        await first.next()  # ready
+        first.send({"type": "select", "camera_id": "a"})
+        assert await _until(lambda: first.frames > _CAMERA_FRAMES)
+        second = LocalViewer()
+        await sig.connect(second, "v1")
+        assert len(svc._conns) == 2
+        frames = first.frames
+        assert await _until(lambda: first.frames > frames + _CAMERA_FRAMES)
+        assert first.inbox.empty()
+        # Cuando el nuevo se autentica con la misma cuenta, ahora sí sustituye.
+        second.send({"type": "auth", "token": _token("acc-1", sid="s2")})
+        assert await first.next() == {"type": "closed", "reason": "replaced"}
+        assert (await second.next())["type"] == "ready"
+        stop.set()
+        await task
+
+    asyncio.run(scenario())
+
+
+def test_reoffer_same_client_closes_unauthenticated_connection():
+    async def scenario() -> None:
+        svc, sig, _, stop, task = await _service()
+        first = LocalViewer()
+        await sig.connect(first, "v1")
+        old_conn = next(iter(svc._conns))
+        second = LocalViewer()
+        await sig.connect(second, "v1")
+        assert old_conn not in svc._conns and len(svc._conns) == 1
+        stop.set()
+        await task
+
+    asyncio.run(scenario())
