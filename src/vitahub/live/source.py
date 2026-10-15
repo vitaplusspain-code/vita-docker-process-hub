@@ -143,6 +143,7 @@ class _Subscriber(MediaStreamTrack):  # type: ignore[misc]  # aiortc sin tipos (
 
 @dataclass
 class _Entry:
+    camera_id: str
     source: MediaStreamTrack
     refs: int = 0
     subs: set[_Subscriber] = field(default_factory=set)
@@ -183,6 +184,10 @@ class SourcePool:
         self._opener = opener
         self._max_fps = max_fps
         self._entries: dict[str, _Entry] = {}
+        # Pista entregada -> su entrada: `release` actúa sobre la entrada de
+        # *esa* pista, no sobre la que haya ahora para la cámara (que puede ser
+        # otra si la anterior murió y se reabrió).
+        self._tracks: dict[MediaStreamTrack, _Entry] = {}
         self._lock = asyncio.Lock()
 
     async def acquire(self, target: LiveTarget) -> MediaStreamTrack:
@@ -202,13 +207,15 @@ class SourcePool:
                 except Exception as exc:  # (sin noqa: BLE001 no salta al re-lanzar) cualquier fallo de apertura = no disponible
                     _log.warning("live: cam %s no abre: %s", target.camera_id, exc)
                     raise SourceUnavailable(target.camera_id) from exc
-                entry = _Entry(source=source)
+                entry = _Entry(camera_id=target.camera_id, source=source)
                 entry.reader = asyncio.create_task(self._pump(target.camera_id, entry))
                 self._entries[target.camera_id] = entry
             entry.refs += 1
             sub = _Subscriber(entry.subs.discard)
             entry.subs.add(sub)
-            return FpsLimitedTrack(sub, self._max_fps)
+            track = FpsLimitedTrack(sub, self._max_fps)
+            self._tracks[track] = entry
+            return track
 
     @staticmethod
     def _stop_orphan(fut: asyncio.Future[MediaStreamTrack]) -> None:
@@ -241,18 +248,26 @@ class SourcePool:
         entry.subs.clear()
         _stop_source(entry.source)
 
-    def release(self, camera_id: str) -> None:
-        entry = self._entries.get(camera_id)
+    def release(self, track: MediaStreamTrack) -> None:
+        """Devuelve la pista que dio `acquire` (la misma instancia).
+
+        También la para: quien llama solo tiene que hacer `release`. Es
+        idempotente, y si la entrada de la pista ya murió o fue sustituida no
+        toca la entrada actual de la cámara.
+        """
+        entry = self._tracks.pop(track, None)
         if entry is None:
             return
+        track.stop()
         entry.refs -= 1
-        if entry.refs <= 0:
-            del self._entries[camera_id]
+        if entry.refs <= 0 and self._entries.get(entry.camera_id) is entry:
+            del self._entries[entry.camera_id]
             self._teardown(entry)
 
     def close_all(self) -> None:
         entries = list(self._entries.values())
         self._entries.clear()
+        self._tracks.clear()
         for entry in entries:
             self._teardown(entry)
 

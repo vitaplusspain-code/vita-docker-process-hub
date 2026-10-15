@@ -78,12 +78,12 @@ def test_pool_shares_one_source_per_camera():
     target = LiveTarget("a", "salón", "rtsp://x")
 
     async def scenario() -> None:
-        await pool.acquire(target)
-        await pool.acquire(target)
+        t1 = await pool.acquire(target)
+        t2 = await pool.acquire(target)
         assert opened == ["rtsp://x"]
-        pool.release("a")
+        pool.release(t1)
         assert tracks[0].readyState == "live"
-        pool.release("a")
+        pool.release(t2)
         # Con el último visor se cierra el RTSP: no se lee vídeo que nadie mira.
         # La parada va al executor, así que se espera un momento.
         await asyncio.sleep(0.1)
@@ -135,7 +135,7 @@ def test_last_release_ends_pending_recv():
         track = await pool.acquire(_T)
         pending = asyncio.ensure_future(_drain(track))
         await asyncio.sleep(0.05)
-        pool.release("a")
+        pool.release(track)
         with pytest.raises(MediaStreamError):
             await asyncio.wait_for(pending, 1)
 
@@ -187,9 +187,75 @@ def test_source_stop_runs_off_event_loop():
     pool = SourcePool(lambda uri: _Track(), max_fps=30)
 
     async def scenario() -> None:
-        await pool.acquire(_T)
-        pool.release("a")
+        pool.release(await pool.acquire(_T))
         await asyncio.sleep(0.1)
         assert seen and seen[0] != threading.get_ident()
+
+    asyncio.run(scenario())
+
+
+class _DyingTrack(_FakeTrack):
+    async def recv(self) -> VideoFrame:
+        if self.n >= 1:
+            raise MediaStreamError
+        return await super().recv()
+
+
+def test_reader_death_ends_subscribers_and_reopens():
+    made: list[MediaStreamTrack] = []
+
+    def opener(uri: str) -> MediaStreamTrack:
+        made.append(_DyingTrack() if not made else _FakeTrack())
+        return made[-1]
+
+    pool = SourcePool(opener, max_fps=30)
+
+    async def scenario() -> None:
+        old = await pool.acquire(_T)
+        with pytest.raises(MediaStreamError):
+            await asyncio.wait_for(_drain(old), 1)
+        assert "a" not in pool._entries
+        new = await pool.acquire(_T)
+        assert len(made) == 2
+        await asyncio.wait_for(new.recv(), 1)
+        pool.close_all()
+
+    asyncio.run(scenario())
+
+
+def test_stale_release_does_not_touch_new_entry():
+    made: list[MediaStreamTrack] = []
+
+    def opener(uri: str) -> MediaStreamTrack:
+        made.append(_DyingTrack() if not made else _FakeTrack())
+        return made[-1]
+
+    pool = SourcePool(opener, max_fps=30)
+
+    async def scenario() -> None:
+        old = await pool.acquire(_T)
+        with pytest.raises(MediaStreamError):
+            await asyncio.wait_for(_drain(old), 1)
+        new = await pool.acquire(_T)
+        pool.release(old)
+        assert pool._entries["a"].refs == 1
+        await asyncio.wait_for(new.recv(), 1)
+        assert made[1].readyState == "live"
+        pool.close_all()
+
+    asyncio.run(scenario())
+
+
+def test_double_release_is_noop():
+    pool, tracks = _pool()
+
+    async def scenario() -> None:
+        t1, t2 = await pool.acquire(_T), await pool.acquire(_T)
+        pool.release(t1)
+        pool.release(t1)
+        assert pool._entries["a"].refs == 1
+        await asyncio.wait_for(t2.recv(), 1)
+        assert tracks[0].readyState == "live"
+        pool.close_all()
 
     asyncio.run(scenario())
