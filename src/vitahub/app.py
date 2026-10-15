@@ -114,6 +114,7 @@ def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
         env=env,
         engine_factory=build_admin_engine_factory(env),
         request_shutdown=stop.set,
+        hub_id=cfg.hub_id,
     )
     httpd = _start_control_server_safe(
         service, env.get("VITAHUB_ADMIN_TOKEN", ""), admin_port(env), admin_ctx

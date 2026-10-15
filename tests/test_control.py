@@ -286,6 +286,7 @@ def admin_server(tmp_path: Path):
         env={"VITAHUB_ONVIF_USER": "u", "VITAHUB_ONVIF_PASSWORD": "p"},
         engine_factory=lambda: engine,
         request_shutdown=lambda: shutdowns.append(True),
+        hub_id="hub-vivo",
     )
     (tmp_path / "hub.yaml").write_text(
         "hub_id: hub-test\ninference:\n  detector: person_pose\n"
@@ -360,6 +361,7 @@ def test_upload_with_broken_engine_factory_is_500(tmp_path: Path):
         env={},
         engine_factory=_broken_factory,
         request_shutdown=lambda: None,
+        hub_id="hub-test",
     )
     httpd = start_control_server(
         _FakeService(_ok_result()), "secreto", port=0, host="127.0.0.1", admin=ctx
@@ -399,6 +401,7 @@ def test_config_roundtrip_over_http(admin_server):
     status, body = _request(f"{base}/api/config", token="secreto")
     assert status == 200
     assert json.loads(body) == {
+        "hub_id": "hub-vivo",
         "fall_enabled": True, "identity_enabled": False, "match_threshold": 0.4,
     }
 
@@ -413,6 +416,15 @@ def test_config_roundtrip_over_http(admin_server):
 
     status, body = _request(f"{base}/api/config", token="secreto")
     assert json.loads(body)["match_threshold"] == 0.5
+
+
+def test_config_reports_running_hub_id_read_only(admin_server):
+    # El hub_id que se muestra es el del proceso en marcha (el que usa AWS),
+    # no el del fichero: el fixture los hace distintos a propósito.
+    base, _ = admin_server()
+    status, body = _request(f"{base}/api/config", token="secreto")
+    assert status == 200
+    assert json.loads(body)["hub_id"] == "hub-vivo"
 
 
 def test_config_invalid_combo_is_400(admin_server):

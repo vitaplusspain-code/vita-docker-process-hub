@@ -352,7 +352,7 @@ Rutas:
 | `GET /api/people/<id>/photos/<foto>` | Descarga una foto. |
 | `DELETE /api/people/<id>/photos/<foto>` | Borra una foto. |
 | `DELETE /api/people/<id>` | Borra la persona entera. |
-| `GET /api/config` | Lee `fall_enabled`, `identity_enabled`, `match_threshold` de `hub.yaml`. |
+| `GET /api/config` | Lee `fall_enabled`, `identity_enabled`, `match_threshold` de `hub.yaml`, y el `hub_id` **del proceso en marcha** (solo lectura: es el nombre del thing de AWS IoT; cambiarlo exige re-aprovisionar el hub). |
 | `PUT /api/config` | Escribe esos tres campos (`admin/config_edit.py`); valida con `load_config` real **antes** de reemplazar el fichero — si no valida, `hub.yaml` queda como estaba. |
 | `POST /api/apply` | Valida la combinación (identidad encendida exige al menos una persona con una foto), responde `200` y **entonces** pide el apagado. |
 

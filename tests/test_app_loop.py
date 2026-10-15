@@ -17,6 +17,7 @@ def _fake_admin_context() -> AdminContext:
         env={},
         engine_factory=lambda: (_ for _ in ()).throw(NotImplementedError()),
         request_shutdown=lambda: None,
+        hub_id="hub-test",
     )
 
 

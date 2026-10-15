@@ -99,6 +99,9 @@ class AdminContext:
     env: Mapping[str, str]
     engine_factory: Callable[[], FaceEngine]
     request_shutdown: Callable[[], None]
+    # El del proceso en marcha, no el del fichero: es el que usa AWS (thing,
+    # clientId, topic). Solo lectura — cambiarlo exige re-aprovisionar el hub.
+    hub_id: str
 
 
 def admin_port(env: Mapping[str, str]) -> int:
@@ -171,6 +174,7 @@ def _build_handler(
                     self._respond(400, {"error": str(err)})
                     return
                 self._respond(200, {
+                    "hub_id": admin.hub_id,
                     "fall_enabled": s.fall_enabled,
                     "identity_enabled": s.identity_enabled,
                     "match_threshold": s.match_threshold,

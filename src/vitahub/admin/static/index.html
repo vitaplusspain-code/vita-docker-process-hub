@@ -44,6 +44,7 @@
 
 <section>
   <h2>Configuración</h2>
+  <p>Identificador del hub: <code id="hub-id">—</code> (solo lectura; se fija al aprovisionar en AWS)</p>
   <label class="row"><input type="checkbox" id="fall"> Detección de caídas</label>
   <label class="row"><input type="checkbox" id="identity"> Identidad de persona (requiere caídas)</label>
   <label>Umbral de coincidencia (<span id="thr-val">0.40</span> — 0.4 = sin calibrar)
@@ -119,6 +120,7 @@ async function refreshPeople() {
 
 async function refreshConfig() {
   const c = await (await api("/api/config")).json();
+  $("hub-id").textContent = c.hub_id;
   $("fall").checked = c.fall_enabled;
   $("identity").checked = c.identity_enabled;
   $("thr").value = c.match_threshold;
