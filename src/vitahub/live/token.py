@@ -28,6 +28,9 @@ class TokenRejected:
     # malformed | unknown_kid | bad_signature | expired | wrong_hub. Solo para
     # logs: al viewer le llega siempre `closed:invalid`, sin pistas de por qué.
     reason: str
+    # Solo con `expired`: exp − now (s). Un valor muy negativo con tokens recién
+    # emitidos apunta a un reloj del hub adelantado (sin NTP), no al viewer.
+    exp_minus_now_s: float | None = None
 
 
 def load_session_keys(raw: Mapping[str, str]) -> dict[str, ec.EllipticCurvePublicKey]:
@@ -93,7 +96,7 @@ def verify_token(
         return TokenRejected("malformed")
     exp = float(exp_value)
     if exp <= now:
-        return TokenRejected("expired")
+        return TokenRejected("expired", exp - now)
     return SessionClaims(
         sid=payload["sid"], sub=payload["sub"], hub=payload["hub"], exp=exp
     )

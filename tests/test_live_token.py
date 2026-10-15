@@ -52,7 +52,13 @@ def test_signature_from_another_key_is_rejected():
 
 
 def test_expired_token_is_rejected():
-    assert verify_token(_token(), _KEYS, "hub-1", now=1600) == TokenRejected("expired")
+    assert verify_token(_token(), _KEYS, "hub-1", now=1600) == TokenRejected("expired", 0.0)
+
+
+def test_expired_reports_exp_minus_now():
+    # Un reloj del hub adelantado (sin NTP) rechaza tokens recién emitidos:
+    # exp − now en el log lo delata sin tener que registrar el token.
+    assert verify_token(_token(), _KEYS, "hub-1", now=1900) == TokenRejected("expired", -300.0)
 
 
 def test_token_for_another_hub_is_rejected():

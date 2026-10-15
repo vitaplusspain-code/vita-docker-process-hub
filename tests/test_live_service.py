@@ -72,6 +72,9 @@ class _FakeSignaling:
             raise SignalingClosed("cortado")
         return msg
 
+    async def fresh_ice_servers(self) -> list[object]:
+        return self.ice_servers
+
     async def send_answer(self, client_id: str, sdp: str) -> None:
         self.answers[client_id].set_result(sdp)
 
@@ -462,5 +465,142 @@ def test_reoffer_same_client_closes_unauthenticated_connection():
         assert old_conn not in svc._conns and len(svc._conns) == 1
         stop.set()
         await task
+
+    asyncio.run(scenario())
+
+
+def test_backoff_resets_after_long_lived_signaling(monkeypatch):
+    # Un canal que estuvo abierto un buen rato sin ofertas (lo normal en un
+    # hogar) y se corta no debe heredar el backoff de cortes anteriores.
+    import vitahub.live.service as service_mod
+
+    attempts: list[int] = []
+
+    def fake_backoff(attempt: int) -> float:
+        attempts.append(attempt)
+        return 0.01
+
+    monkeypatch.setattr(service_mod, "backoff_delay", fake_backoff)
+    monkeypatch.setattr(service_mod, "_STABLE_SIGNALING_S", 0.2)
+    holds = iter([0.0, 0.3, 0.0])
+
+    class _Dropping(_FakeSignaling):
+        def __init__(self) -> None:
+            super().__init__()
+            self._hold = next(holds, 10.0)
+
+        async def recv(self) -> SignalingMessage:
+            await asyncio.sleep(self._hold)
+            raise SignalingClosed("cortado")
+
+    async def scenario() -> None:
+        stop = asyncio.Event()
+        svc = LiveService(
+            hub_id="hub-1", max_viewers=3, keys=_KEYS, signaling_factory=_Dropping,
+            sources=SourcePool(_opener, max_fps=15), targets=lambda: _TARGETS,
+            sink=_Sink(), tick_s=0.05,
+        )
+        task = asyncio.ensure_future(svc.run(stop))
+        assert await _until(lambda: len(attempts) >= 3)
+        stop.set()
+        await task
+        # corte rápido → 0; el siguiente aguantó 0,3 s ≥ umbral → vuelve a 0;
+        # corte rápido otra vez → 1 (no 2).
+        assert attempts[:3] == [0, 0, 1]
+
+    asyncio.run(scenario())
+
+
+def test_select_same_camera_or_too_fast_is_ignored():
+    async def scenario() -> None:
+        _, sig, sink, stop, task = await _service(targets=_MORE_TARGETS)
+        viewer = await _auth(sig, "acc-1", "v1")
+        await viewer.next()
+        viewer.send({"type": "select", "camera_id": "a"})
+        assert await _until(lambda: any(e.type == "live_view_started" for e in sink.events))
+        viewer.send({"type": "select", "camera_id": "a"})  # la que ya se ve
+        viewer.send({"type": "select", "camera_id": "c"})  # < 1 s del último aceptado
+        await asyncio.sleep(0.3)
+        assert _OPENED == ["rtsp://a"]
+        started = [e.payload["camera_id"] for e in sink.events if e.type == "live_view_started"]
+        assert started == ["a"]
+        await asyncio.sleep(1.0)
+        viewer.send({"type": "select", "camera_id": "c"})  # pasado el segundo: vale
+        assert await _until(lambda: _OPENED == ["rtsp://a", "rtsp://c"])
+        stop.set()
+        await task
+
+    asyncio.run(scenario())
+
+
+def test_unauthenticated_peers_are_capped():
+    # Sin token no se ocupa plaza de viewer, pero cada peer cuesta memoria y un
+    # puerto UDP: más de 2 × max_viewers sin autenticar y las ofertas se ignoran.
+    async def scenario() -> None:
+        svc, sig, _, stop, task = await _service(max_viewers=1)
+        for client in ("v1", "v2"):
+            await sig.connect(LocalViewer(), client)
+        extra = LocalViewer()
+        sig.answers["v3"] = asyncio.get_running_loop().create_future()
+        await sig.inbox.put(
+            SignalingMessage("SDP_OFFER", "v3", {"type": "offer", "sdp": await extra.offer()})
+        )
+        await asyncio.sleep(0.5)
+        assert not sig.answers["v3"].done()
+        assert len(svc._conns) == 2
+        stop.set()
+        await task
+
+    asyncio.run(scenario())
+
+
+class _FakePeer:
+    def __init__(self, send_fails: bool = False, close_hangs: bool = False) -> None:
+        self.conn_id = "c1"
+        self.client_id = "v1"
+        self.closed = False
+        self._send_fails = send_fails
+        self._close_hangs = close_hangs
+
+    def send(self, text: str) -> None:
+        if self._send_fails:
+            raise RuntimeError("canal roto")
+
+    async def close(self) -> None:
+        if self._close_hangs:
+            await asyncio.Event().wait()
+        self.closed = True
+
+
+def _bare_service() -> LiveService:
+    return LiveService(
+        hub_id="hub-1", max_viewers=3, keys=_KEYS, signaling_factory=_FakeSignaling,
+        sources=SourcePool(_opener, max_fps=15), targets=lambda: _TARGETS, sink=_Sink(),
+    )
+
+
+def test_close_runs_peer_close_even_if_send_fails():
+    from vitahub.live.service import _Conn
+
+    async def scenario() -> None:
+        svc = _bare_service()
+        peer = _FakePeer(send_fails=True)
+        svc._conns["c1"] = _Conn(peer=peer, started_at=0.0)  # type: ignore[arg-type]
+        await svc._close("c1", "invalid")
+        assert peer.closed
+
+    asyncio.run(scenario())
+
+
+def test_close_does_not_hang_on_stuck_peer(monkeypatch):
+    import vitahub.live.service as service_mod
+    from vitahub.live.service import _Conn
+
+    monkeypatch.setattr(service_mod, "_PEER_CLOSE_TIMEOUT_S", 0.1)
+
+    async def scenario() -> None:
+        svc = _bare_service()
+        svc._conns["c1"] = _Conn(peer=_FakePeer(close_hangs=True), started_at=0.0)  # type: ignore[arg-type]
+        await asyncio.wait_for(svc._close("c1", "shutdown"), 1.0)
 
     asyncio.run(scenario())

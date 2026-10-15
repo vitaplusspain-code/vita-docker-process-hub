@@ -4,6 +4,7 @@ import asyncio
 import base64
 import binascii
 import json
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
@@ -14,10 +15,16 @@ from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
 
 from vitahub.live.credentials import AwsCredentials, IotCredentialsProvider
+from vitahub.logging_setup import get_logger
+
+_log = get_logger("live.signaling")
 
 # La URL prefirmada solo tiene que valer para el handshake: la conexión WSS
 # ya abierta no caduca con ella.
 _PRESIGN_EXPIRES_S = 300
+# Los servidores TURN se renuevan si les queda menos de esto: una oferta debe
+# llevarse credenciales que aún valgan cuando el viewer haga ICE.
+_ICE_REFRESH_MARGIN_S = 60.0
 
 
 @dataclass(frozen=True)
@@ -36,6 +43,8 @@ class ChannelEndpoints:
     arn: str
     wss: str
     ice_servers: list[RTCIceServer]
+    # El menor `Ttl` de los TURN (s); None si no hay TURN (no hace falta renovar).
+    ice_ttl_s: float | None = None
 
 
 def channel_name(prefix: str, hub_id: str) -> str:
@@ -118,11 +127,16 @@ def resolve_endpoints(channel: str, region: str, creds: AwsCredentials) -> Chann
         "kinesis-video-signaling", region_name=region, endpoint_url=endpoints["HTTPS"], **keys
     )
     ice = [RTCIceServer(urls=f"stun:stun.kinesisvideo.{region}.amazonaws.com:443")]
+    ttls: list[float] = []
     for server in sig.get_ice_server_config(ChannelARN=arn, Service="TURN")["IceServerList"]:
         ice.append(
             RTCIceServer(urls=server["Uris"], username=server["Username"], credential=server["Password"])
         )
-    return ChannelEndpoints(arn=arn, wss=endpoints["WSS"], ice_servers=ice)
+        if "Ttl" in server:
+            ttls.append(float(server["Ttl"]))
+    return ChannelEndpoints(
+        arn=arn, wss=endpoints["WSS"], ice_servers=ice, ice_ttl_s=min(ttls) if ttls else None
+    )
 
 
 class Signaling(Protocol):
@@ -130,6 +144,7 @@ class Signaling(Protocol):
 
     async def open(self) -> None: ...
     async def recv(self) -> SignalingMessage: ...
+    async def fresh_ice_servers(self) -> list[RTCIceServer]: ...
     async def send_answer(self, client_id: str, sdp: str) -> None: ...
     async def close(self) -> None: ...
 
@@ -139,7 +154,8 @@ class KvsSignaling:
 
     No reintenta: si la conexión cae, `recv` lanza `SignalingClosed` y quien
     reconecta (con backoff) es `LiveService`, creando una instancia nueva con
-    credenciales y servidores TURN frescos.
+    credenciales y servidores TURN frescos. Como una conexión puede durar
+    horas y los TURN caducan en minutos, `fresh_ice_servers` los renueva.
     """
 
     def __init__(
@@ -147,12 +163,16 @@ class KvsSignaling:
         resolve: Callable[[], ChannelEndpoints],
         creds: IotCredentialsProvider,
         region: str,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._resolve = resolve
         self._creds = creds
         self._region = region
+        self._clock = clock
         self._ws: ClientConnection | None = None
         self.ice_servers: list[RTCIceServer] = []
+        self._ice_fetched_at = 0.0
+        self._ice_ttl_s: float | None = None
 
     async def open(self) -> None:
         loop = asyncio.get_running_loop()
@@ -160,7 +180,7 @@ class KvsSignaling:
         # congelar a los viewers ya conectados mientras se resuelve.
         endpoints = await loop.run_in_executor(None, self._resolve)
         creds = await loop.run_in_executor(None, self._creds.get)
-        self.ice_servers = endpoints.ice_servers
+        self._set_ice(endpoints)
         url = presign_wss_url(endpoints.wss, endpoints.arn, creds, self._region)
         self._ws = await connect(url, open_timeout=10)
 
@@ -175,6 +195,24 @@ class KvsSignaling:
             msg = decode_message(raw)
             if msg is not None:
                 return msg
+
+    def _set_ice(self, endpoints: ChannelEndpoints) -> None:
+        self.ice_servers = endpoints.ice_servers
+        self._ice_ttl_s = endpoints.ice_ttl_s
+        self._ice_fetched_at = self._clock()
+
+    async def fresh_ice_servers(self) -> list[RTCIceServer]:
+        """Servidores ICE para una oferta nueva, renovados si están por caducar."""
+        ttl = self._ice_ttl_s
+        if ttl is not None and self._clock() - self._ice_fetched_at >= ttl - _ICE_REFRESH_MARGIN_S:
+            try:
+                # Bloqueante (botocore): al executor, como en `open`.
+                endpoints = await asyncio.get_running_loop().run_in_executor(None, self._resolve)
+            except Exception as exc:  # noqa: BLE001 — sin renovar se usan los anteriores: mejor que perder la oferta
+                _log.warning("live: no se pudieron renovar los servidores ICE: %s", exc)
+            else:
+                self._set_ice(endpoints)
+        return self.ice_servers
 
     async def send_answer(self, client_id: str, sdp: str) -> None:
         if self._ws is None:

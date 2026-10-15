@@ -4,6 +4,7 @@ import json
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from aiortc import RTCIceServer
 from websockets.asyncio.server import ServerConnection, serve
 
 from vitahub.live.credentials import AwsCredentials, IotCredentialsProvider
@@ -112,5 +113,74 @@ def test_kvs_signaling_against_local_server():
             await asyncio.sleep(0.05)
             await sig.close()
         assert json.loads(received[0])["recipientClientId"] == "v1"
+
+    asyncio.run(scenario())
+
+
+def test_ice_servers_refresh_when_close_to_ttl():
+    # Las credenciales TURN caducan (Ttl ~300 s) y la conexión WSS dura horas:
+    # una oferta tardía debe recibir servidores frescos, no los del `open`.
+    async def scenario() -> None:
+        async def handler(ws: ServerConnection) -> None:
+            await ws.wait_closed()
+
+        now = [1000.0]
+        resolved: list[int] = []
+
+        def resolve() -> ChannelEndpoints:
+            resolved.append(1)
+            ice = [RTCIceServer(urls=f"turn:t{len(resolved)}", username="u", credential="p")]
+            return ChannelEndpoints("arn:c", f"ws://127.0.0.1:{port}", ice, ice_ttl_s=300.0)
+
+        async with serve(handler, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            body = json.dumps({"credentials": {
+                "accessKeyId": "AK", "secretAccessKey": "SK", "sessionToken": "TK",
+                "expiration": "2099-01-01T00:00:00Z"}}).encode()
+            sig = KvsSignaling(
+                resolve=resolve, creds=IotCredentialsProvider(lambda: body),
+                region="eu-west-1", clock=lambda: now[0],
+            )
+            await sig.open()
+            now[0] += 230  # dentro de Ttl − 60 s: se reutilizan
+            assert [s.urls for s in await sig.fresh_ice_servers()] == ["turn:t1"]
+            assert len(resolved) == 1
+            now[0] += 20  # 250 s > 300 − 60: se piden otros
+            assert [s.urls for s in await sig.fresh_ice_servers()] == ["turn:t2"]
+            assert len(resolved) == 2
+            await sig.close()
+
+    asyncio.run(scenario())
+
+
+def test_ice_refresh_failure_keeps_previous_servers():
+    async def scenario() -> None:
+        async def handler(ws: ServerConnection) -> None:
+            await ws.wait_closed()
+
+        now = [0.0]
+        calls: list[int] = []
+
+        def resolve() -> ChannelEndpoints:
+            calls.append(1)
+            if len(calls) > 1:
+                raise OSError("AWS caído")
+            ice = [RTCIceServer(urls="turn:t1", username="u", credential="p")]
+            return ChannelEndpoints("arn:c", f"ws://127.0.0.1:{port}", ice, ice_ttl_s=300.0)
+
+        async with serve(handler, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            body = json.dumps({"credentials": {
+                "accessKeyId": "AK", "secretAccessKey": "SK", "sessionToken": "TK",
+                "expiration": "2099-01-01T00:00:00Z"}}).encode()
+            sig = KvsSignaling(
+                resolve=resolve, creds=IotCredentialsProvider(lambda: body),
+                region="eu-west-1", clock=lambda: now[0],
+            )
+            await sig.open()
+            now[0] += 1000
+            # Mejor unos TURN quizá caducados que perder la oferta.
+            assert [s.urls for s in await sig.fresh_ice_servers()] == ["turn:t1"]
+            await sig.close()
 
     asyncio.run(scenario())

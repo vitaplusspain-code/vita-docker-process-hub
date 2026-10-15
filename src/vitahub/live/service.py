@@ -34,6 +34,15 @@ _log = get_logger("live.service")
 # Margen para que el `closed` salga por el DataChannel antes de cerrar el peer:
 # si se cierra en el acto, el viewer ve un corte sin motivo.
 _CLOSED_FLUSH_S = 0.05
+# Cerrar un RTCPeerConnection roto puede colgarse: el cierre no debe bloquear
+# el tick de caducidades, la sustitución ni el apagado.
+_PEER_CLOSE_TIMEOUT_S = 2.0
+# Una señalización que aguantó abierta este tiempo se considera sana: si cae,
+# se reintenta desde el primer escalón del backoff.
+_STABLE_SIGNALING_S = 60.0
+# Entre dos cambios de cámara de una conexión: cada cambio abre (o suelta) un
+# RTSP, y un viewer con prisa o malicioso no debe hacerlo en bucle.
+_MIN_SELECT_INTERVAL_S = 1.0
 
 
 @dataclass
@@ -51,6 +60,8 @@ class _Conn:
     # y se vacía si la cámara muere, pero `live_view_ended` debe nombrar la
     # misma cámara que su `live_view_started` (auditoría emparejada).
     last_camera: LiveTarget | None = None
+    # Instante (monotónico) del último select que pasó el filtro de ritmo.
+    last_select_at: float | None = None
     timers: list[asyncio.TimerHandle] = field(default_factory=list)
 
 
@@ -87,6 +98,10 @@ class LiveService:
         self._connect_timeout = connect_timeout_s
         self._tick = tick_s
         self._book = SessionBook(max_viewers)
+        # Peers sin autenticar no ocupan plaza (SessionBook), pero cada uno es
+        # memoria, un puerto UDP y un hilo de ICE: tope para que nadie sin
+        # token pueda agotar el hub a base de ofertas.
+        self._max_unauth = 2 * max_viewers
         self._conns: dict[str, _Conn] = {}
         self._by_client: dict[str, str] = {}
         # Tareas lanzadas desde callbacks síncronos (timers): se guardan para
@@ -161,8 +176,10 @@ class LiveService:
         attempt = 0
         while not stop.is_set():
             signaling = self._signaling_factory()
+            opened_at: float | None = None
             try:
                 await signaling.open()
+                opened_at = time.monotonic()
                 _log.info("live: conectado al canal de señalización")
                 while True:
                     msg = await signaling.recv()
@@ -181,6 +198,10 @@ class LiveService:
             except Exception:  # noqa: BLE001 — credenciales, red, AWS: se reintenta
                 _log.exception("live: fallo en la señalización")
             await self._close_signaling(signaling)
+            if opened_at is not None and time.monotonic() - opened_at >= _STABLE_SIGNALING_S:
+                # Lo normal en un hogar es pasar horas sin ofertas: un canal que
+                # aguantó no debe heredar el backoff de cortes de hace días.
+                attempt = 0
             # Los viewers ya conectados siguen: el P2P no pasa por aquí.
             delay = backoff_delay(attempt)
             attempt = next_attempt(attempt)
@@ -216,9 +237,17 @@ class LiveService:
             # La sustituirá el `auth` de la nueva (regla 4) o morirá por ICE;
             # solo se remapea `_by_client` a la nueva conexión, abajo.
             await self._close(previous, None)
+        unauth = sum(1 for c in self._conns if self._book.claims_for(c) is None)
+        if unauth >= self._max_unauth:
+            # Sin respuesta el navegador desiste solo; nada que cerrar.
+            _log.warning(
+                "live: oferta de %s ignorada: ya hay %d peers sin autenticar", msg.client_id, unauth
+            )
+            return
+        ice_servers = await signaling.fresh_ice_servers()
         conn_id = uuid.uuid4().hex
         peer = ViewerPeer(
-            conn_id, msg.client_id, signaling.ice_servers,
+            conn_id, msg.client_id, ice_servers,
             self._on_open, self._on_message, self._on_peer_closed,
         )
         conn = _Conn(peer=peer, started_at=self._clock())
@@ -267,7 +296,14 @@ class LiveService:
     async def _on_auth(self, conn_id: str, msg: AuthMsg) -> None:
         verdict = verify_token(msg.token, self._keys, self._hub_id, self._clock())
         if isinstance(verdict, TokenRejected):
-            _log.info("live: token rechazado (%s)", verdict.reason)
+            if verdict.exp_minus_now_s is not None:
+                # Nunca el token: solo cuánto le falta o sobra al reloj.
+                _log.info(
+                    "live: token rechazado (%s, exp − now = %.0f s)",
+                    verdict.reason, verdict.exp_minus_now_s,
+                )
+            else:
+                _log.info("live: token rechazado (%s)", verdict.reason)
             await self._close(conn_id, "invalid")
             return
         # SessionBook saca a los sustituidos del libro antes de devolver: sus
@@ -292,10 +328,23 @@ class LiveService:
             return  # select antes del auth: se ignora, el plazo del auth ya corre
         if claims.exp <= self._clock():
             return  # caducada a falta de tick: no se abre cámara, el tick la cierra
+        if conn.camera is not None:
+            # Solo con una cámara en pantalla: tras `camera_unavailable` el
+            # viewer debe poder elegir otra en el acto.
+            if conn.camera.camera_id == msg.camera_id:
+                return  # la que ya se ve: reabrir no aporta nada
+            now = time.monotonic()
+            if conn.last_select_at is not None and now - conn.last_select_at < _MIN_SELECT_INTERVAL_S:
+                _log.info("live: select demasiado seguido en %s, se ignora", conn_id)
+                return
         target = next((t for t in self._targets() if t.camera_id == msg.camera_id), None)
         if target is None:
             conn.peer.send(closed_message("camera_unavailable"))
             return
+        # Antes de abrir, no después: los mensajes del canal se atienden en
+        # tareas concurrentes y un segundo select durante la apertura RTSP
+        # debe ver ya este instante.
+        conn.last_select_at = time.monotonic()
         try:
             track = await self._sources.acquire(target)
         except SourceUnavailable:
@@ -386,10 +435,21 @@ class LiveService:
                 self._hub_id, claims, cam_id, cam_name, ended_reason or reason or "closed",
                 self._clock() - conn.started_at, self._now(),
             ))
-        if reason is not None:
-            conn.peer.send(closed_message(reason))
-            await asyncio.sleep(_CLOSED_FLUSH_S)
-        await conn.peer.close()
+        try:
+            if reason is not None:
+                conn.peer.send(closed_message(reason))
+                await asyncio.sleep(_CLOSED_FLUSH_S)
+        except Exception as exc:  # noqa: BLE001 — el aviso es best-effort; el peer se cierra igual
+            _log.warning("live: no se pudo avisar del cierre a %s: %s", conn_id, exc)
+        finally:
+            await self._close_peer(conn.peer)
+
+    @staticmethod
+    async def _close_peer(peer: ViewerPeer) -> None:
+        try:
+            await asyncio.wait_for(peer.close(), _PEER_CLOSE_TIMEOUT_S)
+        except TimeoutError:
+            _log.warning("live: el peer %s no cerró en %.1f s", peer.conn_id, _PEER_CLOSE_TIMEOUT_S)
 
     def _emit(self, event: Event) -> None:
         try:
