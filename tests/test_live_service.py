@@ -351,6 +351,24 @@ def test_camera_death_notifies_and_reselect_resumes():
     asyncio.run(scenario())
 
 
+def test_ended_after_camera_death_names_the_dead_camera():
+    async def scenario() -> None:
+        _, sig, sink, stop, task = await _service(targets=_MORE_TARGETS)
+        viewer = await _auth(sig, "acc-1", "v1")
+        await viewer.next()
+        viewer.send({"type": "select", "camera_id": "d"})
+        assert await viewer.next() == {"type": "closed", "reason": "camera_unavailable"}
+        stop.set()
+        assert await viewer.next() == {"type": "closed", "reason": "shutdown"}
+        await asyncio.wait_for(task, 5)
+        started = [e for e in sink.events if e.type == "live_view_started"]
+        ended = [e for e in sink.events if e.type == "live_view_ended"]
+        assert [(e.camera_id, e.camera_name) for e in started] == [("d", "garaje")]
+        assert [(e.camera_id, e.camera_name) for e in ended] == [("d", "garaje")]
+
+    asyncio.run(scenario())
+
+
 def test_renewal_does_not_reemit_started():
     async def scenario() -> None:
         _, sig, sink, stop, task = await _service()

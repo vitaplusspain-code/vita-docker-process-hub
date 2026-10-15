@@ -352,3 +352,68 @@ def test_switch_track_stop_ends_recv_without_stopping_source():
         assert source.readyState == "live"
 
     asyncio.run(scenario())
+
+
+class _OneShotTrack(MediaStreamTrack):
+    """Entrega un único frame y luego se queda esperando (como una cámara lenta)."""
+
+    kind = "video"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.sent: list[VideoFrame] = []
+        self.go = asyncio.Event()
+
+    async def recv(self) -> VideoFrame:
+        if self.sent:
+            await asyncio.Event().wait()
+        await self.go.wait()
+        frame = VideoFrame(width=16, height=16)
+        frame.pts, frame.time_base = 7, fractions.Fraction(1, 90000)
+        self.sent.append(frame)
+        return frame
+
+
+def test_each_subscriber_gets_its_own_frame_object():
+    sources: list[_OneShotTrack] = []
+
+    def opener(uri: str) -> MediaStreamTrack:
+        sources.append(_OneShotTrack())
+        return sources[-1]
+
+    pool = SourcePool(opener, max_fps=30)
+
+    async def scenario() -> None:
+        t1, t2 = await pool.acquire(_T), await pool.acquire(_T)
+        sources[0].go.set()
+        f1 = await asyncio.wait_for(t1.recv(), 1)
+        f2 = await asyncio.wait_for(t2.recv(), 1)
+        assert len(sources[0].sent) == 1  # el mismo frame de la fuente, repartido
+        assert f1 is not f2
+        assert (f1.to_ndarray() == f2.to_ndarray()).all()
+        assert f1.pts == f2.pts == 7 and f1.time_base == f2.time_base
+        f1.pts = 999
+        f1.time_base = fractions.Fraction(1, 1000)
+        assert f2.pts == 7 and f2.time_base == fractions.Fraction(1, 90000)
+        pool.close_all()
+
+    asyncio.run(scenario())
+
+
+def test_single_subscriber_gets_frame_without_copy():
+    sources: list[_OneShotTrack] = []
+
+    def opener(uri: str) -> MediaStreamTrack:
+        sources.append(_OneShotTrack())
+        return sources[-1]
+
+    pool = SourcePool(opener, max_fps=30)
+
+    async def scenario() -> None:
+        track = await pool.acquire(_T)
+        sources[0].go.set()
+        frame = await asyncio.wait_for(track.recv(), 1)
+        assert frame is sources[0].sent[0]
+        pool.close_all()
+
+    asyncio.run(scenario())

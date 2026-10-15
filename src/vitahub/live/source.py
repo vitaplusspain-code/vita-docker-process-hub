@@ -100,9 +100,7 @@ class IdleTrack(MediaStreamTrack):  # type: ignore[misc]  # aiortc sin tipos (An
         return frame
 
 
-# Origen común a todas las SwitchTrack: el fan-out entrega el *mismo* objeto
-# frame a varios viewers y cada uno le reescribe el pts; con un reloj compartido
-# todos escriben (casi) el mismo valor y ningún emisor ve el tiempo retroceder.
+# Origen del reloj de salida de las SwitchTrack (90 kHz desde aquí).
 _PTS_ORIGIN = time.monotonic()
 
 
@@ -180,7 +178,9 @@ class SwitchTrack(MediaStreamTrack):  # type: ignore[misc]  # aiortc sin tipos (
 
     def _stamp(self, frame: VideoFrame) -> VideoFrame:
         # Cada fuente trae su propio reloj (pts y time_base sin relación entre
-        # cámaras): el codificador debe ver siempre un tiempo que avanza.
+        # cámaras): el codificador debe ver siempre un tiempo que avanza. Se
+        # escribe sobre el frame recibido porque es solo de este viewer: el
+        # fan-out da a cada suscriptor su propio objeto (ver `_copy_frame`).
         pts = int((time.monotonic() - _PTS_ORIGIN) * _VIDEO_CLOCK)
         pts = max(pts, self._last_pts + 1)
         self._last_pts = pts
@@ -265,6 +265,23 @@ def _stop_source(source: MediaStreamTrack) -> None:
     loop.run_in_executor(None, _safe)
 
 
+def _copy_frame(frame: VideoFrame) -> VideoFrame | None:
+    """Copia independiente de `frame` (PyAV no tiene `copy`; `reformat` al mismo
+    formato devuelve el mismo objeto). Vía numpy: ~0,05 ms a 320x180."""
+    try:
+        copy = VideoFrame.from_ndarray(frame.to_ndarray(), format=frame.format.name)
+    except Exception:  # noqa: BLE001 — formato sin soporte numpy (p. ej. yuvj422p)
+        try:
+            # Un formato distinto obliga a reformat a crear un frame nuevo.
+            copy = frame.reformat(format="yuv420p")
+        except Exception as exc:  # noqa: BLE001 — sin copia ese viewer se salta este frame
+            _log.warning("live: no se pudo copiar un frame: %s", exc)
+            return None
+    copy.pts = frame.pts
+    copy.time_base = frame.time_base
+    return copy
+
+
 class SourcePool:
     """Una conexión RTSP por cámara vista, compartida entre sus viewers.
 
@@ -321,8 +338,15 @@ class SourcePool:
         try:
             while True:
                 frame: VideoFrame = await entry.source.recv()
-                for sub in list(entry.subs):
-                    sub.push(frame)
+                # Cada viewer necesita su propio objeto: SwitchTrack reescribe
+                # el pts y el codificador de aiortc (en otro hilo) reescribe
+                # tiempo y pict_type sobre el frame; compartido, un viewer
+                # pisaría el keyframe pedido por otro. Con uno solo, sin copia.
+                subs = list(entry.subs)
+                for i, sub in enumerate(subs):
+                    copy = frame if i == 0 else _copy_frame(frame)
+                    if copy is not None:
+                        sub.push(copy)
                 # Una fuente que no suspende no debe acaparar el bucle.
                 await asyncio.sleep(0)
         except asyncio.CancelledError:

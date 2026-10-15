@@ -47,6 +47,10 @@ class _Conn:
     # La pista fija del emisor (se crea con el primer select): los cambios de
     # cámara pasan por ella, nunca por `replaceTrack` (ver SwitchTrack).
     switch: SwitchTrack | None = None
+    # La última cámara que se llegó a ver: `camera` es "la que se emite ahora"
+    # y se vacía si la cámara muere, pero `live_view_ended` debe nombrar la
+    # misma cámara que su `live_view_started` (auditoría emparejada).
+    last_camera: LiveTarget | None = None
     timers: list[asyncio.TimerHandle] = field(default_factory=list)
 
 
@@ -310,6 +314,7 @@ class LiveService:
         conn.switch.set_source(track)
         conn.track = track
         conn.camera = target
+        conn.last_camera = target
         if old is not None:
             self._sources.release(old)
         self._emit(
@@ -370,8 +375,8 @@ class LiveService:
         if conn.track is not None:
             self._sources.release(conn.track)
         if claims is not None:
-            cam_id = conn.camera.camera_id if conn.camera else ""
-            cam_name = conn.camera.name if conn.camera else ""
+            cam_id = conn.last_camera.camera_id if conn.last_camera else ""
+            cam_name = conn.last_camera.name if conn.last_camera else ""
             self._emit(live_view_ended(
                 self._hub_id, claims, cam_id, cam_name, ended_reason or reason or "closed",
                 self._clock() - conn.started_at, self._now(),
