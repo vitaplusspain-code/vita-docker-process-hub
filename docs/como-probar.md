@@ -311,15 +311,25 @@ ni que la regla escriba en DynamoDB. Eso solo se comprueba contra la cuenta real
 
 Solo se comprueba contra la cuenta real; los tests usan señalización y cámaras falsas.
 
+> **Puerta de despliegue.** No actives `live.enabled` en un hogar sin antes (a) ejecutar el spike
+> de CPU del Jetson (Tarea 1 del plan del directo; ver `backlog.md`) y (b) pasar esta prueba con
+> **una cámara con audio** — la mayoría lo tienen y el directo solo debe pedir el vídeo.
+
 1. **Requisitos:** infra `hub-live` desplegada y el canal del hogar creado (lo hace
    `provision-hub.sh` del repo de arquitectura); `uplink.enabled: true`; en `hub.yaml`,
    `live.enabled: true` y `live.session_keys` con el `kid` y la clave pública que imprime
    `scripts/live-public-key.sh`; y las variables de entorno `VITAHUB_IOT_CREDENTIALS_ENDPOINT`,
-   `VITAHUB_LIVE_ROLE_ALIAS` y `VITAHUB_LIVE_CHANNEL_PREFIX`.
+   `VITAHUB_LIVE_ROLE_ALIAS` y `VITAHUB_LIVE_CHANNEL_PREFIX`. **El reloj del Jetson debe estar en
+   hora (NTP):** el hub compara el `exp` del token con su reloj, y uno adelantado rechaza tokens
+   recién emitidos con `closed:invalid`. En ese caso el log dice
+   `live: token rechazado (expired, exp − now = -N s)`; un `N` grande con tokens recién emitidos es
+   el reloj, no la app.
 2. **Arranque:** en `docker logs` aparece `vídeo en directo habilitado (canal <prefijo>-<hub_id>, máx.
    N visores)` y, cuando el servicio alcanza AWS, `live: conectado al canal de señalización`. Sin
    internet el hub arranca igual y los `live:` muestran los reintentos con backoff.
 3. **Ver una cámara** desde la app web: debe llegar vídeo y aparecer un `live_view_started`.
+   Repítelo con una cámara que tenga micrófono: el vídeo debe llegar igual (el hub no pide el
+   audio a la cámara).
 4. **Sustitución:** abre un segundo dispositivo con la misma cuenta; el primero debe recibir
    `closed:replaced` (y salir un `live_view_ended` con `reason: replaced`).
 5. **Caducidad:** deja pasar el `exp` del token sin renovar; la conexión se cierra con

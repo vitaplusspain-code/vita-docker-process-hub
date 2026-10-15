@@ -181,6 +181,13 @@ después.
 
 ### Diferidos del slice de vídeo en directo (2026-10-15)
 
+- **Puerta de despliegue (bloqueante por hogar).** Antes de poner `live.enabled: true` en un
+  hogar: (1) ejecutar el spike de CPU de `aiortc` en el Jetson (Tarea 1 del plan
+  `docs/superpowers/plans/2026-10-15-video-en-directo-hub.md`) y anotar el resultado en el spec
+  §4.3, y (2) hacer la prueba manual de `como-probar.md` §4b con **una cámara con audio**, que es
+  el caso de la mayoría y el que rompió la primera versión del opener. Ninguna de las dos se
+  puede cubrir con los tests: necesitan el Jetson y una cámara real.
+
 - **Indicador en el hogar de que alguien está viendo.** Hoy nadie en la casa sabe que hay un
   directo en curso: el único rastro son los eventos `live_view_*` hacia la nube. Es deuda de
   privacidad (spec §2, fuera de alcance de v1); un piloto o LED visible, o un aviso en el hogar,
@@ -273,6 +280,6 @@ Del slice de rescan quedan además estos cuatro, que solo se pueden comprobar co
 4. Apagar una cámara → su worker reintenta con backoff y **no** desaparece del registro.
 
 Y tres números que se eligieron por estimación razonada, sin medir en un Jetson real: el
-`--start-period=180s` del `HEALTHCHECK`, el plazo de apagado de 20 s y el `stop_grace_period: 30s`.
+`--start-period=180s` del `HEALTHCHECK`, el plazo de apagado de 20 s y el `stop_grace_period: 45s`.
 Si en campo el arranque con varias cámaras lentas supera los 180 s, o si un apagado que iba bien se
 corta, son los tres primeros a revisar.

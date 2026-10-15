@@ -224,7 +224,16 @@ arranque falla rápido con un `ConfigError` (igual que `build_sink`).
 5. Admitir un viewer nuevo superaría `live.max_viewers` → el nuevo recibe `closed:limit`.
 6. Apagado del hub → todos reciben `closed:shutdown`.
 
-**Cámaras.** Se usa siempre el substream si existe. La conexión RTSP del directo es aparte de la de
+Además, para que nadie sin token pueda gastar recursos del hogar: como mucho `2 × max_viewers`
+peers sin autenticar a la vez (más ofertas se ignoran); una oferta nueva con el `client_id` de una
+conexión **sin autenticar** la sustituye, pero si esa conexión ya está autenticada no se toca (la
+sustituirá el `auth` de la nueva por la regla 4); y un `select` de la cámara que ya se ve, o a
+menos de 1 s del anterior mientras hay cámara en pantalla, se ignora. Los servidores TURN se
+renuevan al llegar una oferta si les queda menos de 60 s de vida.
+
+**Cámaras.** Se usa siempre el substream si existe; si no, el principal, reescalado a 640 de ancho
+(una vez por frame de la cámara, antes de repartirlo). Al abrir la cámara solo se pide el vídeo
+(`allowed_media_types=video`) y solo se decodifica el vídeo: el audio ni se negocia. La conexión RTSP del directo es aparte de la de
 inferencia y solo está abierta mientras alguien mira esa cámara; varios viewers de la misma cámara
 comparten esa conexión (`SourcePool`), y cuando hay más de uno cada viewer recibe su propia copia de
 cada frame (el primero recibe el original, el resto copias), porque cada emisor de `aiortc` escribe
@@ -235,7 +244,18 @@ Si la cámara no abre (apagada, sin slot RTSP) o cae a mitad del directo, el vie
 
 **Eventos.** `live_view_started` al seleccionar una cámara y `live_view_ended` al cerrarse la
 conexión (con `reason` y `seconds`), ambos con severidad `info` por el sink normal: rastro de
-auditoría del lado hub, con `sid`, `account_id` y cámara.
+auditoría del lado hub, con `sid`, `account_id` y cámara. `live_view_ended` solo sale si hubo
+sesión (un `auth` válido), y su `reason` es uno de:
+
+| `reason` | Cuándo |
+|---|---|
+| `replaced` | Otra conexión de la misma cuenta se autenticó (regla 4). |
+| `expired` | Llegó el `exp` sin renovar (regla 3). |
+| `invalid` | Una renovación por la misma conexión trajo un token de otra cuenta. |
+| `limit` | Reservado: hoy una conexión rechazada por el tope nunca tuvo sesión, así que no emite `live_view_ended`. |
+| `shutdown` | Apagado del hub (regla 6). |
+| `disconnected` | El peer se cayó (ICE `failed`, el viewer cerró la pestaña). |
+| `closed` | Cierre sin motivo concreto (reserva; no debería verse en la práctica). |
 
 **Config** (`hub.yaml`, sección `live`): `enabled` (false), `max_viewers` (3, 1–10), `max_fps`
 (15, 1–30), `region` (`eu-west-1`) y `session_keys` (`kid` → clave pública PEM P-256). Por entorno:
