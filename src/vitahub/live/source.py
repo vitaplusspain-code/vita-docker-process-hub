@@ -34,7 +34,8 @@ def live_targets(cameras: list[Camera], user: str, password: str) -> list[LiveTa
     """Cámaras que se pueden ver en directo, con su URI con credenciales.
 
     Siempre el substream si existe (spec §4.2): cada viewer es un flujo de
-    subida del hogar y el principal multiplicaría el ancho de banda.
+    subida del hogar y el principal multiplicaría el ancho de banda. Sin
+    substream se usa el principal, y `SourcePool` lo reescala (`_downscale`).
     """
     targets = []
     for cam in cameras:
@@ -286,6 +287,27 @@ def _copy_frame(frame: VideoFrame) -> VideoFrame | None:
     return copy
 
 
+# Ancho máximo del directo. `live_targets` cae al stream principal si la
+# cámara no tiene substream: sin tope, cada viewer sería un 1080p de subida.
+_MAX_WIDTH = 640
+
+
+def _downscale(frame: VideoFrame) -> VideoFrame:
+    """Reduce a `_MAX_WIDTH` de ancho, manteniendo la proporción y con
+    dimensiones pares (las exige yuv420p, y `_copy_frame` vía numpy).
+
+    Se hace en `_pump`, antes del reparto: un reformat por frame de la fuente,
+    no uno por viewer.
+    """
+    if frame.width <= _MAX_WIDTH:
+        return frame
+    height = max(2, 2 * round(frame.height * _MAX_WIDTH / frame.width / 2))
+    scaled = frame.reformat(width=_MAX_WIDTH, height=height)
+    scaled.pts = frame.pts
+    scaled.time_base = frame.time_base
+    return scaled
+
+
 class SourcePool:
     """Una conexión RTSP por cámara vista, compartida entre sus viewers.
 
@@ -341,7 +363,7 @@ class SourcePool:
     async def _pump(self, camera_id: str, entry: _Entry) -> None:
         try:
             while True:
-                frame: VideoFrame = await entry.source.recv()
+                frame: VideoFrame = _downscale(await entry.source.recv())
                 # Cada viewer necesita su propio objeto: SwitchTrack reescribe
                 # el pts y el codificador de aiortc (en otro hilo) reescribe
                 # tiempo y pict_type sobre el frame; compartido, un viewer

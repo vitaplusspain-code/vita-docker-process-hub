@@ -504,3 +504,37 @@ def test_opener_defaults_ask_rtsp_for_video_only_and_close_on_no_video(monkeypat
     assert isinstance(opts, dict)
     assert opts["allowed_media_types"] == "video" and opts["rtsp_transport"] == "tcp"
     assert _Container.closed  # sin vídeo no queda una conexión RTSP abierta
+
+
+class _SizedTrack(_FakeTrack):
+    def __init__(self, width: int, height: int) -> None:
+        super().__init__()
+        self._size = (width, height)
+
+    async def recv(self) -> VideoFrame:
+        self.n += 1
+        await asyncio.sleep(0.005)
+        frame = VideoFrame(width=self._size[0], height=self._size[1])
+        frame.pts, frame.time_base = self.n, fractions.Fraction(1, 90000)
+        return frame
+
+
+@pytest.mark.parametrize(
+    ("size", "expected"),
+    [((1280, 720), (640, 360)), ((1920, 1081), (640, 360)), ((1279, 721), (640, 360)),
+     ((640, 480), (640, 480)), ((320, 180), (320, 180))],
+)
+def test_pool_downscales_wide_sources_to_640(size, expected):
+    # Una cámara sin substream cae al principal: cada viewer sería un flujo
+    # 1080p de subida del hogar. Se reescala una vez por frame de la fuente.
+    pool = SourcePool(lambda uri: _SizedTrack(*size), max_fps=30)
+
+    async def scenario() -> None:
+        t1, t2 = await pool.acquire(_T), await pool.acquire(_T)
+        f1 = await asyncio.wait_for(t1.recv(), 1)
+        f2 = await asyncio.wait_for(t2.recv(), 1)
+        assert (f1.width, f1.height) == (f2.width, f2.height) == expected
+        assert f1 is not f2
+        pool.close_all()
+
+    asyncio.run(scenario())
