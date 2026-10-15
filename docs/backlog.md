@@ -179,6 +179,17 @@ después.
   sin que nada lo señale. Mitigación manual hoy: borrar la entrada a mano del YAML en cuanto aparezca
   la descubierta. Arreglo de código pendiente de diseñar (¿deduplicar por URI RTSP normalizada?).
 
+### Diferidos del slice de vídeo en directo (2026-10-15)
+
+- **Indicador en el hogar de que alguien está viendo.** Hoy nadie en la casa sabe que hay un
+  directo en curso: el único rastro son los eventos `live_view_*` hacia la nube. Es deuda de
+  privacidad (spec §2, fuera de alcance de v1); un piloto o LED visible, o un aviso en el hogar,
+  sería el primer candidato.
+- **Corte duro entre hubs distintos de la misma cuenta.** El hub solo ve sus propias conexiones; la
+  misma cuenta viendo dos hubs a la vez se resuelve en la nube con `live_session` y el corte es
+  **cooperativo** (la pestaña vieja se cierra sola al ver otro `sid`; un cliente modificado
+  podría ignorarlo). El corte duro llega por `exp`, con un máximo de 10 min (spec §3.5).
+
 ### Diferidos del slice de uplink (2026-08-21)
 
 - **Sin cola: lo que no sale, se pierde.** Decisión consciente del slice. Duele en la

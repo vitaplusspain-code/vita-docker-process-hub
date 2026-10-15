@@ -4,10 +4,12 @@ services:
     image: vitahub:local
     restart: unless-stopped
     network_mode: host          # necesario para el multicast ONVIF de descubrimiento
-    # Margen por encima del plazo global de apagado (20s en app.py) antes de
-    # que Docker mande SIGKILL; el valor por defecto de Docker (10s) se
-    # queda corto para el peor caso.
-    stop_grace_period: 30s
+    # Margen por encima del peor caso de apagado antes de que Docker mande
+    # SIGKILL: 20s de cámaras + 5s del directo (_CAMERA_SHUTDOWN_DEADLINE_S y
+    # _LIVE_SHUTDOWN_DEADLINE_S en app.py, se suman porque van en serie) más
+    # el cierre del control HTTP y del sink. Con 30s sobraban solo 5s; 45s
+    # dejan 20s. El valor por defecto de Docker (10s) se queda corto.
+    stop_grace_period: 45s
     # Tope de logs: el driver json-file por defecto NO limita el tamaño del
     # stdout de eventos, y este aparato está pensado para correr años
     # desatendido. Además, desde este slice cada petición rechazada a

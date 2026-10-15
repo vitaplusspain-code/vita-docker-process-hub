@@ -1,9 +1,9 @@
 import logging
 import threading
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from vitahub.app import _rescan_loop, _start_control_server_safe
+from vitahub.app import _rescan_loop, _shutdown, _start_control_server_safe
 from vitahub.control import AdminContext
 from vitahub.rescan import RescanResult
 
@@ -96,3 +96,33 @@ def test_emit_all_survives_a_failing_sink():
     sink = _BoomSink()
     _emit_all(sink, ["evento-1", "evento-2"])
     assert len(sink.seen) == 2  # siguió con el segundo pese al fallo del primero
+
+
+def test_shutdown_stops_live_before_supervisor_and_sink():
+    # Los live_view_ended de los viewers que se cortan salen por el sink:
+    # cerrarlo antes perdería la auditoría del apagado.
+    order: list[str] = []
+    live = MagicMock(stop=lambda **_: order.append("live"))
+    supervisor = MagicMock(stop_all=lambda **_: order.append("supervisor"))
+    sink = MagicMock(close=lambda: order.append("sink"))
+    _shutdown(None, live, supervisor, sink)
+    assert order == ["live", "supervisor", "sink"]
+
+
+def test_shutdown_continues_even_if_live_stop_fails():
+    sink = MagicMock()
+    supervisor = MagicMock()
+    live = MagicMock()
+    live.stop.side_effect = RuntimeError("boom")
+    try:
+        _shutdown(None, live, supervisor, sink)
+    except RuntimeError:
+        pass
+    supervisor.stop_all.assert_called_once()
+    sink.close.assert_called_once()
+
+
+def test_shutdown_without_live():
+    sink = MagicMock()
+    _shutdown(None, None, MagicMock(), sink)
+    sink.close.assert_called_once()

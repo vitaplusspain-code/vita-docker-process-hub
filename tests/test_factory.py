@@ -9,9 +9,15 @@ from vitahub.config import (
     HubConfig,
     IdentityConfig,
     InferenceConfig,
+    LiveConfig,
     UplinkConfig,
 )
-from vitahub.factory import build_detector, build_face_identifier, build_sink
+from vitahub.factory import (
+    build_detector,
+    build_face_identifier,
+    build_live_service,
+    build_sink,
+)
 from vitahub.inference.person_pose_yolo import PosePersonDetector
 from vitahub.inference.person_yolo import PersonDetector
 from vitahub.inference.stub import StubDetector
@@ -198,3 +204,33 @@ def test_admin_engine_factory_missing_weights_raises_config_error(tmp_path):
     # Construir la factory no toca disco; llamar sí, y falla legible.
     with pytest.raises(ConfigError):
         factory()
+
+
+def test_build_live_service_disabled_returns_none():
+    # `_hub_config` ya trae un LiveConfig por defecto (apagado).
+    assert build_live_service(_hub_config(), StdoutJsonSink()) is None
+
+
+def test_build_live_service_wraps_unreadable_pem_as_config_error(tmp_path):
+    # https_fetcher construye el contexto ssl al instante: un PEM truncado o
+    # ilegible debe salir como ConfigError con las rutas, no como traceback.
+    bad = tmp_path / "bad.pem"
+    bad.write_text("esto no es un PEM")
+    cfg = _hub_config(
+        UplinkConfig(
+            enabled=True,
+            endpoint="abc-ats.iot.eu-west-1.amazonaws.com",
+            ca_path=str(bad),
+            cert_path=str(bad),
+            key_path=str(bad),
+        )
+    )
+    cfg.live = LiveConfig(
+        enabled=True,
+        credentials_endpoint="c.credentials.iot.eu-west-1.amazonaws.com",
+        role_alias="hub-live",
+        channel_prefix="vita-dev-live",
+    )
+    with pytest.raises(ConfigError, match="bad.pem") as info:
+        build_live_service(cfg, StdoutJsonSink())
+    assert info.value.__cause__ is not None

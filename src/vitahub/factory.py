@@ -12,6 +12,11 @@ from vitahub.inference.base import Detector
 from vitahub.inference.person_pose_yolo import PosePersonDetector
 from vitahub.inference.person_yolo import PersonDetector
 from vitahub.inference.stub import StubDetector
+from vitahub.live.credentials import IotCredentialsProvider, https_fetcher
+from vitahub.live.service import LiveService
+from vitahub.live.signaling import KvsSignaling, channel_name, resolve_endpoints
+from vitahub.live.source import SourcePool, live_targets, open_rtsp_track
+from vitahub.live.token import load_session_keys
 from vitahub.logging_setup import get_logger
 from vitahub.sinks.aws_iot import AwsIotSink, build_client, topic_for
 from vitahub.sinks.base import EventSink
@@ -85,6 +90,56 @@ def build_sink(cfg: HubConfig) -> EventSink:
     topic = topic_for(cfg.uplink.topic_prefix, cfg.hub_id)
     _log.info("uplink habilitado hacia %s", topic)
     return FanoutSink([stdout, AwsIotSink(client, topic)])
+
+
+def build_live_service(cfg: HubConfig, sink: EventSink) -> LiveService | None:
+    """El servicio de directo, o None si `live.enabled` es false.
+
+    No conecta nada aquí: la primera llamada a AWS ocurre en el hilo del
+    servicio, con reintento. Un hogar sin internet arranca igual y vigila.
+    """
+    if not cfg.live.enabled:
+        return None
+    live = cfg.live
+    # `https_fetcher` construye el contexto ssl al instante y `load_config` solo
+    # comprueba que los ficheros existen: un PEM truncado o ilegible revienta
+    # aquí con `ssl.SSLError`/`FileNotFoundError`. Como en `build_sink`, se
+    # relanza como `ConfigError` (el técnico está delante) con rutas y causa.
+    try:
+        fetch = https_fetcher(
+            live.credentials_endpoint,
+            live.role_alias,
+            cfg.hub_id,
+            Path(cfg.uplink.ca_path),
+            Path(cfg.uplink.cert_path),
+            Path(cfg.uplink.key_path),
+        )
+    except Exception as exc:  # se traduce a ConfigError abajo (con la causa encadenada)
+        raise ConfigError(
+            "live.enabled es true pero no se pudo preparar la conexión al credentials "
+            f"provider ({exc}) — revisa que los certificados en {cfg.uplink.ca_path}, "
+            f"{cfg.uplink.cert_path} y {cfg.uplink.key_path} existan y sean PEM válidos"
+        ) from exc
+    creds = IotCredentialsProvider(fetch)
+    channel = channel_name(live.channel_prefix, cfg.hub_id)
+    _log.info("vídeo en directo habilitado (canal %s, máx. %d visores)", channel, live.max_viewers)
+    return LiveService(
+        hub_id=cfg.hub_id,
+        max_viewers=live.max_viewers,
+        keys=load_session_keys(live.session_keys),
+        signaling_factory=lambda: KvsSignaling(
+            resolve=lambda: resolve_endpoints(channel, live.region, creds.get()),
+            creds=creds,
+            region=live.region,
+        ),
+        sources=SourcePool(open_rtsp_track, max_fps=live.max_fps),
+        # Se lee cfg.cameras en cada llamada: RescanService la sustituye en
+        # cada ciclo, y así el directo ve las cámaras nuevas sin reiniciar.
+        targets=lambda: live_targets(
+            cfg.cameras, cfg.credentials.onvif_user, cfg.credentials.onvif_password
+        ),
+        sink=sink,
+    )
 
 
 def _require_face_weights(root: str) -> None:

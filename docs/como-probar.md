@@ -307,6 +307,33 @@ ni que la regla escriba en DynamoDB. Eso solo se comprueba contra la cuenta real
 
 ---
 
+## 4b. Vídeo en directo (opcional)
+
+Solo se comprueba contra la cuenta real; los tests usan señalización y cámaras falsas.
+
+1. **Requisitos:** infra `hub-live` desplegada y el canal del hogar creado (lo hace
+   `provision-hub.sh` del repo de arquitectura); `uplink.enabled: true`; en `hub.yaml`,
+   `live.enabled: true` y `live.session_keys` con el `kid` y la clave pública que imprime
+   `scripts/live-public-key.sh`; y las variables de entorno `VITAHUB_IOT_CREDENTIALS_ENDPOINT`,
+   `VITAHUB_LIVE_ROLE_ALIAS` y `VITAHUB_LIVE_CHANNEL_PREFIX`.
+2. **Arranque:** en `docker logs` aparece `vídeo en directo habilitado (canal <prefijo>-<hub_id>, máx.
+   N visores)` y, cuando el servicio alcanza AWS, `live: conectado al canal de señalización`. Sin
+   internet el hub arranca igual y los `live:` muestran los reintentos con backoff.
+3. **Ver una cámara** desde la app web: debe llegar vídeo y aparecer un `live_view_started`.
+4. **Sustitución:** abre un segundo dispositivo con la misma cuenta; el primero debe recibir
+   `closed:replaced` (y salir un `live_view_ended` con `reason: replaced`).
+5. **Caducidad:** deja pasar el `exp` del token sin renovar; la conexión se cierra con
+   `closed:expired`.
+6. **Cámara caída:** apaga la cámara en directo; el viewer recibe `camera_unavailable`, sigue
+   conectado y puede elegir otra.
+7. **Eventos esperados** (severidad `info`): `live_view_started` y `live_view_ended` en
+   `docker logs` y en la tabla `hub-events`; el `payload` trae `sid`, `account_id` y, en el cierre,
+   `reason` y `seconds`.
+8. **Apagado:** `docker stop` con un viewer conectado → el viewer recibe `closed:shutdown` y el
+   `live_view_ended` sale **antes** de que se cierre el sink.
+
+---
+
 ## 5. Administración del técnico
 
 Página web local para enrolar personas y ajustar caídas/identidad sin tocar YAML ni la terminal —

@@ -20,6 +20,7 @@ from vitahub.factory import (
     build_admin_engine_factory,
     build_detector,
     build_face_identifier,
+    build_live_service,
     build_sink,
 )
 from vitahub.ingest.rtsp import (
@@ -29,6 +30,7 @@ from vitahub.ingest.rtsp import (
     open_capture,
     should_sample,
 )
+from vitahub.live.service import LiveService
 from vitahub.logging_setup import configure_logging, get_logger, register_secret
 from vitahub.models import Camera, Event
 from vitahub.rescan import RescanService
@@ -46,6 +48,9 @@ _DEFAULT_POSE_WEIGHTS = "/app/models/yolo11n-pose.pt"
 # atascadas en cap.read(). El tiempo TOTAL de stop_all() queda acotado por
 # este valor; debe quedar con margen real por debajo de stop_grace_period.
 _CAMERA_SHUTDOWN_DEADLINE_S = 20.0
+# El directo cierra sus peers con este plazo; sumado al de las cámaras debe
+# seguir con margen por debajo del stop_grace_period de Docker.
+_LIVE_SHUTDOWN_DEADLINE_S = 5.0
 
 
 def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
@@ -120,6 +125,12 @@ def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
         service, env.get("VITAHUB_ADMIN_TOKEN", ""), admin_port(env), admin_ctx
     )
 
+    # Tras el rescan inicial: `cfg.cameras` ya tiene las cámaras descubiertas.
+    # Si `live.enabled` es false no se crea nada y el hub es el de siempre.
+    live = build_live_service(cfg, sink)
+    if live is not None:
+        live.start()
+
     # En su propio hilo: si el rescan compartiera hilo con el heartbeat, un
     # discover() lento dejaría de latir y el contenedor quedaría marcado
     # `unhealthy` pese a estar sano (el HEALTHCHECK señala, no remedia).
@@ -140,18 +151,23 @@ def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
             _touch_heartbeat()
     finally:
         _log.info("apagando (SIGTERM)")
-        _shutdown(httpd, supervisor, sink)
+        _shutdown(httpd, live, supervisor, sink)
 
 
 def _shutdown(
-    httpd: ThreadingHTTPServer | None, supervisor: CameraSupervisor, sink: EventSink
+    httpd: ThreadingHTTPServer | None,
+    live: LiveService | None,
+    supervisor: CameraSupervisor,
+    sink: EventSink,
 ) -> None:
     """Cierra en orden y con cada paso garantizado pase lo que pase con el anterior.
 
     Primero el control HTTP: si se cerrara después de parar los workers, una
     petición POST /rescan que ya estuviera en vuelo podría llegar a
     `supervisor.apply()` tras `stop_all()` y arrancar workers huérfanos que ya
-    nadie señalará. Luego los workers, con un plazo global acotado (no por
+    nadie señalará. Luego el directo, que avisa a sus viewers con
+    `closed:shutdown` y emite sus `live_view_ended` por el sink — por eso va
+    antes de cerrarlo. Luego los workers, con un plazo global acotado (no por
     cámara, ver `_CAMERA_SHUTDOWN_DEADLINE_S`). El sink se cierra siempre,
     incluso si algo de lo anterior falla.
     """
@@ -161,9 +177,13 @@ def _shutdown(
             httpd.server_close()
     finally:
         try:
-            supervisor.stop_all(deadline_s=_CAMERA_SHUTDOWN_DEADLINE_S)
+            if live is not None:
+                live.stop(timeout_s=_LIVE_SHUTDOWN_DEADLINE_S)
         finally:
-            sink.close()
+            try:
+                supervisor.stop_all(deadline_s=_CAMERA_SHUTDOWN_DEADLINE_S)
+            finally:
+                sink.close()
 
 
 def _start_control_server_safe(

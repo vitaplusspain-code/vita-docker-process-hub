@@ -7,8 +7,10 @@ convertirse en un evento. Para instalar o probar, ver [como-probar.md](como-prob
 
 `vitahub` es una aplicación Python que corre como **un contenedor Docker en un mini-PC/Jetson dentro
 de cada hogar**. Se conecta a las cámaras IP de la casa, convierte el vídeo en **eventos** (p. ej.
-"ha entrado una persona") y los emite como texto. Todo el vídeo se procesa en el hogar; al exterior
-solo sale texto.
+"ha entrado una persona") y los emite como texto. El vídeo se procesa en el hogar y al exterior
+salen eventos de texto. La única excepción es el vídeo en directo: bajo demanda, para cuentas
+habilitadas por el técnico con consentimiento, por WebRTC y sin almacenarse nunca (ver «Vídeo en
+directo» más abajo).
 
 Alcance de esta versión (primer slice): **descubrimiento de cámaras + ingesta RTSP + detección de
 persona (presencia y conteo) + eventos JSON por stdout**, con un **uplink opcional a AWS IoT Core**
@@ -80,7 +82,16 @@ Dos ideas de diseño que conviene retener:
 | `identity/gallery.py` | `load_gallery`: fotos de `/data/faces/<person_id>/` → embedding medio por persona (en memoria). |
 | `identity/face_id.py` | `FaceIdentifier`: busca caras en pistas anónimas y etiqueta con regla de 2 coincidencias sobre `match_threshold`. |
 | `sinks/` | `EventSink` (interfaz), `StdoutJsonSink`, `FanoutSink` (aísla fallos entre sinks) y `AwsIotSink` (MQTT/TLS a AWS IoT Core). |
-| `factory.py` | Construye el `Detector` según la config (`stub` / `person_yolo` / `person_pose`), el `EventSink` según `uplink.enabled` y el `FaceIdentifier` (`build_face_identifier`) según `inference.identity.enabled`. |
+| `live/token.py` | Carga de claves públicas y verificación del JWT de sesión. Pura. |
+| `live/protocol.py` | Parseo y serialización de mensajes del DataChannel. Pura. |
+| `live/events.py` | Construcción de `live_view_started`/`live_view_ended`. Pura. |
+| `live/sessions.py` | `SessionBook`: admisión, renovación, sustitución, tope y caducidad. Pura. |
+| `live/credentials.py` | Credenciales AWS temporales vía IoT credentials provider, con caché. |
+| `live/signaling.py` | Códec de mensajes KVS, URL prefirmada y cliente WSS como master. |
+| `live/source.py` | Destinos en directo por cámara, pool de fuentes RTSP compartidas, limitador de fps, `SwitchTrack` por conexión y pista en reposo. |
+| `live/peer.py` | `ViewerPeer`: una `RTCPeerConnection` por viewer con su DataChannel. |
+| `live/service.py` | `LiveService`: orquesta todo; `start()`/`stop()`. |
+| `factory.py` | Construye el `Detector` según la config (`stub` / `person_yolo` / `person_pose`), el `EventSink` según `uplink.enabled`, el `FaceIdentifier` (`build_face_identifier`) según `inference.identity.enabled` y el `LiveService` (`build_live_service`) según `live.enabled`. |
 | `worker.py` | `process_frame`: detecta, cuenta, alimenta el motor de presencia y, si hay `fall_engine` y `tracker`, orquesta pistas + identidad (`identifier`) + caídas; emite por el sink. |
 | `logging_setup.py` | Logs JSON a **stderr** + redacción de secretos. |
 
@@ -177,6 +188,60 @@ ilegible, y `build_sink` lo traduce a un `ConfigError` legible en vez de dejar e
 `ssl.SSLError` crudo — mismo criterio de *fail-fast* que el resto de `load_config` (§4.4
 del spec): es un error de instalación y el técnico está delante.
 
+### Vídeo en directo
+
+Opcional (`live.enabled`, apagado por defecto y requiere `uplink.enabled`). Un familiar o cuidador
+ve una cámara desde la app web, por WebRTC, sin que el vídeo pase por ningún servidor propio ni se
+escriba a disco.
+
+```
+ app web ──(1) token de sesión (JWT ES256, lo emite la API)
+    │
+    └─(2) oferta SDP ──► canal de señalización KVS ◄── LiveService (hub, master)
+                                                          │ (3) respuesta SDP + ICE
+    ◄═══ WebRTC P2P (o TURN de KVS): DataChannel `control` + vídeo ═══►
+          (4) {"type":"auth","token":…}  → {"type":"ready","cameras":[…]}
+          (5) {"type":"select","camera_id":…} → vídeo del substream RTSP
+```
+
+`build_live_service` (`factory.py`) lo construye y `app.py` lo arranca tras el rescan inicial, en un
+hilo propio con su propio loop `asyncio`: un fallo de señalización, de credenciales o de un peer se
+reintenta con backoff y no toca la inferencia, los workers ni el sink. No conecta a AWS al
+construirse: un hogar sin internet arranca igual. Las credenciales AWS temporales se piden al IoT
+credentials provider con el mismo certificado X.509 del uplink; si esos PEM son inválidos, el
+arranque falla rápido con un `ConfigError` (igual que `build_sink`).
+
+**Reglas que aplica el hub** (es el único que puede cortar una conexión P2P ya establecida):
+
+1. Sin `auth` válido no se envía ningún frame; el `auth` debe llegar en 5 s desde que abre el
+   DataChannel, y un peer que no abre canal en 30 s se descarta (`closed:invalid`).
+2. Token válido = firma ES256 correcta con un `kid` de `live.session_keys`, `exp` futuro y
+   `hub == hub_id`.
+3. Llega `exp` sin renovar → `closed:expired`. Renovar es mandar otro `auth` por la misma conexión:
+   no cuenta como sustitución ni choca con el tope.
+4. Un `auth` válido de una cuenta (`sub`) que ya tiene **otra** conexión → la anterior recibe
+   `closed:replaced`.
+5. Admitir un viewer nuevo superaría `live.max_viewers` → el nuevo recibe `closed:limit`.
+6. Apagado del hub → todos reciben `closed:shutdown`.
+
+**Cámaras.** Se usa siempre el substream si existe. La conexión RTSP del directo es aparte de la de
+inferencia y solo está abierta mientras alguien mira esa cámara; varios viewers de la misma cámara
+comparten esa conexión (`SourcePool`), y cuando hay más de uno cada viewer recibe su propia copia de
+cada frame (el primero recibe el original, el resto copias), porque cada emisor de `aiortc` escribe
+en el frame que le llega. Cada conexión tiene una única `SwitchTrack` que nunca cambia de cara al
+emisor: al hacer `select` de otra cámara solo cambia su fuente interna, sin matar el emisor.
+Si la cámara no abre (apagada, sin slot RTSP) o cae a mitad del directo, el viewer recibe
+`closed:camera_unavailable`, **conserva la conexión** (la pista pasa a negro) y puede elegir otra.
+
+**Eventos.** `live_view_started` al seleccionar una cámara y `live_view_ended` al cerrarse la
+conexión (con `reason` y `seconds`), ambos con severidad `info` por el sink normal: rastro de
+auditoría del lado hub, con `sid`, `account_id` y cámara.
+
+**Config** (`hub.yaml`, sección `live`): `enabled` (false), `max_viewers` (3, 1–10), `max_fps`
+(15, 1–30), `region` (`eu-west-1`) y `session_keys` (`kid` → clave pública PEM P-256). Por entorno:
+`VITAHUB_IOT_CREDENTIALS_ENDPOINT`, `VITAHUB_LIVE_ROLE_ALIAS` y `VITAHUB_LIVE_CHANNEL_PREFIX`. El
+canal se llama `<prefijo>-<hub_id>`, por lo que con `live.enabled` el `hub_id` no puede contener `:`.
+
 ### 5. Salud y apagado
 - El bucle principal refresca `/data/heartbeat` cada 5 s; el `HEALTHCHECK` de Docker
   (`scripts/healthcheck.py`) lo considera sano si el fichero tiene <60 s.
@@ -191,11 +256,13 @@ del spec): es un error de instalación y el técnico está delante.
   contenedor `unhealthy` en falso.
 - Aun así, el `HEALTHCHECK` da un margen de arranque (`--start-period=180s`) para que la
   carga de YOLO y un primer descubrimiento lento no cuenten como fallo antes de que el
-  hub llegue a latir. Al apagar, `docker-compose.yml` fija `stop_grace_period: 30s` —
-  margen por encima del plazo de apagado de los hilos de cámara (~20 s) antes de que
-  Docker mande `SIGKILL`.
-- Ante `SIGTERM`/`SIGINT` se activa un `Event` de parada, los hilos terminan, el sink se vacía y el
-  proceso sale limpio.
+  hub llegue a latir. Al apagar, `docker-compose.yml` fija `stop_grace_period: 45s` —
+  margen por encima del plazo de apagado de los hilos de cámara (20 s) más el del directo
+  (5 s), que van en serie, antes de que Docker mande `SIGKILL`.
+- Ante `SIGTERM`/`SIGINT` se activa un `Event` de parada y `_shutdown` cierra en orden, con cada paso
+  garantizado aunque falle el anterior: control HTTP, **directo** (avisa a sus viewers con
+  `closed:shutdown` y emite sus `live_view_ended`), workers de cámara y, por último, el sink — por
+  eso el directo va antes: sus eventos de cierre salen por el sink.
 
 ## El envelope de evento
 
