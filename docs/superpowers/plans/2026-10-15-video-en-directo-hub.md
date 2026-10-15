@@ -17,6 +17,7 @@
 - **Token:** JWT ES256, cabecera con `kid`; claims obligatorios `sid`, `sub`, `hub`, `iat`, `exp`. Válido = firma correcta con un `kid` conocido, `exp > now`, `hub == hub_id`.
 - **DataChannel `control`:** mensajes JSON de una línea, exactamente los de spec §3.3. `reason` ∈ `expired | replaced | limit | invalid | camera_unavailable | shutdown`. `camera_unavailable` no cierra la conexión.
 - **Plazos:** `auth` en 5 s desde que abre el DataChannel; un peer que no abre canal en 30 s se descarta.
+- **`kid`** de `live.session_keys` = UUID de la clave KMS (lo fija el plan de infra y lo imprime `scripts/live-public-key.sh`). Con `live.enabled`, `hub_id` no puede contener `:` (KVS no lo admite en nombres de canal).
 - **Config:** `live.enabled` (false), `live.max_viewers` (3, rango 1–10), `live.max_fps` (15, rango 1–30), `live.region` (`eu-west-1`), `live.session_keys` (`kid` → PEM P-256). Entorno: `VITAHUB_IOT_CREDENTIALS_ENDPOINT`, `VITAHUB_LIVE_ROLE_ALIAS`, `VITAHUB_LIVE_CHANNEL_PREFIX`. Con `live.enabled: true` exige `uplink.enabled: true`.
 - **Eventos:** `live_view_started` y `live_view_ended`, severidad `info`, por el sink normal. Payloads exactos de spec §4.5.
 - **Aislamiento:** ningún fallo de `live/` puede afectar a la inferencia, los workers ni el sink. Fallos de red se reintentan con `backoff_delay`/`next_attempt` de `ingest/rtsp.py`.
@@ -506,6 +507,14 @@ def test_live_rejects_out_of_range(tmp_path, field, value):
         load_config(_write(tmp_path, _live_yaml(_live_block(**{field: value}))), _live_env(tmp_path))
 
 
+def test_live_rejects_colon_in_hub_id(tmp_path):
+    # IoT admite ':' en el nombre del thing, KVS no en el del canal: un hub así
+    # nunca podría abrir su canal. Mejor saberlo en la instalación.
+    text = _live_yaml(_live_block()).replace("hub_id: hub-3f9a", "hub_id: hub:3f9a")
+    with pytest.raises(ConfigError, match="':'"):
+        load_config(_write(tmp_path, text), _live_env(tmp_path))
+
+
 def test_live_section_must_be_mapping(tmp_path):
     with pytest.raises(ConfigError, match="live"):
         load_config(_write(tmp_path, VALID_YAML + "live: [1]\n"), ENV)
@@ -545,7 +554,9 @@ Detrás de `_uplink_from_raw`:
 _KVS_MAX_VIEWERS = 10
 
 
-def _live_from_raw(raw: object, env: Mapping[str, str], uplink: UplinkConfig) -> LiveConfig:
+def _live_from_raw(
+    raw: object, env: Mapping[str, str], uplink: UplinkConfig, hub_id: str
+) -> LiveConfig:
     """Lee la sección `live`. Mismo criterio fail-fast que `_uplink_from_raw`.
 
     El técnico que activa el directo está delante del Jetson: una clave mal
@@ -580,6 +591,13 @@ def _live_from_raw(raw: object, env: Mapping[str, str], uplink: UplinkConfig) ->
         raise ConfigError(
             "live.enabled requiere 'uplink.enabled: true': el directo obtiene sus "
             "credenciales AWS con el certificado del uplink"
+        )
+    if ":" in hub_id:
+        # _HUB_ID_RE admite ':' porque IoT lo admite en el thing; el nombre de
+        # canal KVS (<prefijo>-<hub_id>) no. Solo importa con el directo activo.
+        raise ConfigError(
+            f"live.enabled requiere un 'hub_id' sin ':' (recibido: {hub_id!r}): "
+            "los nombres de canal de KVS no lo admiten"
         )
     keys_raw = raw.get("session_keys")
     if not isinstance(keys_raw, dict) or not keys_raw:
@@ -639,7 +657,7 @@ En `load_config`, sustituye el `return HubConfig(...)` final por:
         cameras=_cameras_from_raw(raw.get("cameras") or []),
         credentials=credentials,
         uplink=uplink,
-        live=_live_from_raw(raw.get("live"), env, uplink),
+        live=_live_from_raw(raw.get("live"), env, uplink, hub_id),
     )
 ```
 
