@@ -98,3 +98,53 @@ def test_load_rejects_non_p256_key():
     )
     with pytest.raises(SessionKeyError, match="P-256"):
         load_session_keys({"k1": rsa_pem})
+
+
+def _token_with_claims(claims: dict[str, object]) -> str:
+    """Helper to create token with arbitrary claims for testing validation."""
+    return jwt.encode(claims, _PRIV, algorithm="ES256", headers={"kid": "k1"})
+
+
+@pytest.mark.parametrize("exp_val", [
+    "abc",
+    [1],
+    float("nan"),
+    float("inf"),
+    "1e999",
+])
+def test_invalid_exp_types_are_malformed(exp_val: object):
+    """exp must be int or float (not bool) and finite."""
+    token = _token_with_claims({
+        "sid": "s-1", "sub": "acc-1", "hub": "hub-1", "iat": 1000, "exp": exp_val
+    })
+    assert verify_token(token, _KEYS, "hub-1", 1100) == TokenRejected("malformed")
+
+
+@pytest.mark.parametrize("claim_val", [None, 5, {}])
+def test_sid_must_be_nonempty_str(claim_val: object):
+    """sid must be a non-empty string, not coerced."""
+    token = _token(sid=claim_val)
+    assert verify_token(token, _KEYS, "hub-1", 1100) == TokenRejected("malformed")
+
+
+@pytest.mark.parametrize("claim_val", [None, 5, {}])
+def test_sub_must_be_nonempty_str(claim_val: object):
+    """sub must be a non-empty string, not coerced."""
+    token = _token(sub=claim_val)
+    assert verify_token(token, _KEYS, "hub-1", 1100) == TokenRejected("malformed")
+
+
+@pytest.mark.parametrize("claim_val", [None, 5, {}])
+def test_hub_must_be_nonempty_str(claim_val: object):
+    """hub must be a non-empty string, not coerced."""
+    token = _token(hub=claim_val)
+    assert verify_token(token, _KEYS, "hub-1", 1100) == TokenRejected("malformed")
+
+
+def test_missing_kid_header_is_rejected():
+    """Token without kid header should be rejected as unknown_kid."""
+    token = jwt.encode(
+        {"sid": "s-1", "sub": "acc-1", "hub": "hub-1", "iat": 1000, "exp": 1600},
+        _PRIV, algorithm="ES256", headers={},  # No kid header
+    )
+    assert verify_token(token, _KEYS, "hub-1", 1100) == TokenRejected("unknown_kid")

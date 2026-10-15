@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -76,11 +77,23 @@ def verify_token(
         return TokenRejected("bad_signature")
     except jwt.InvalidTokenError:
         return TokenRejected("malformed")
+    # Validar que sid, sub, hub son strings no vacíos (no se coercen tipos).
+    for claim_name in ("sid", "sub", "hub"):
+        claim_value = payload[claim_name]
+        if not isinstance(claim_value, str) or not claim_value:
+            return TokenRejected("malformed")
+    # Validar que el hub coincida después de confirmar que es string.
     if payload["hub"] != hub_id:
         return TokenRejected("wrong_hub")
-    exp = float(payload["exp"])
+    # Validar que exp es int o float (no bool) y que es finito.
+    exp_value = payload["exp"]
+    if isinstance(exp_value, bool) or not isinstance(exp_value, (int, float)):
+        return TokenRejected("malformed")
+    if not math.isfinite(exp_value):
+        return TokenRejected("malformed")
+    exp = float(exp_value)
     if exp <= now:
         return TokenRejected("expired")
     return SessionClaims(
-        sid=str(payload["sid"]), sub=str(payload["sub"]), hub=str(payload["hub"]), exp=exp
+        sid=payload["sid"], sub=payload["sub"], hub=payload["hub"], exp=exp
     )
