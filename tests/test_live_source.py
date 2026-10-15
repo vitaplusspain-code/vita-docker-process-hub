@@ -538,3 +538,25 @@ def test_pool_downscales_wide_sources_to_640(size, expected):
         pool.close_all()
 
     asyncio.run(scenario())
+
+
+def test_opener_track_stop_ends_recv_and_is_idempotent(tmp_path):
+    from vitahub.live.source import open_rtsp_track
+
+    path = str(tmp_path / "cam.mkv")
+    _write_av_file(path)
+
+    async def scenario() -> None:
+        loop = asyncio.get_running_loop()
+        unused = open_rtsp_track(path, format=None, options={})
+        await loop.run_in_executor(None, unused.stop)  # sin haber leído nunca
+        with pytest.raises(MediaStreamError):
+            await unused.recv()
+        track = open_rtsp_track(path, format=None, options={})
+        await asyncio.wait_for(track.recv(), 5)
+        await loop.run_in_executor(None, track.stop)
+        await loop.run_in_executor(None, track.stop)  # segunda vez: no hace nada
+        with pytest.raises(MediaStreamError):
+            await track.recv()
+
+    asyncio.run(scenario())

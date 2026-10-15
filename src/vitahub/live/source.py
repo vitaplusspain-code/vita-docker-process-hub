@@ -302,7 +302,11 @@ def _downscale(frame: VideoFrame) -> VideoFrame:
     if frame.width <= _MAX_WIDTH:
         return frame
     height = max(2, 2 * round(frame.height * _MAX_WIDTH / frame.width / 2))
-    scaled = frame.reformat(width=_MAX_WIDTH, height=height)
+    try:
+        scaled = frame.reformat(width=_MAX_WIDTH, height=height)
+    except Exception as exc:  # noqa: BLE001 — en `_pump` cualquier excepción mataría la fuente: mejor grande que nada
+        _log.warning("live: no se pudo reescalar un frame: %s", exc)
+        return frame
     scaled.pts = frame.pts
     scaled.time_base = frame.time_base
     return scaled
@@ -448,21 +452,25 @@ class _VideoOnlyTrack(MediaStreamTrack):  # type: ignore[misc]  # aiortc sin tip
     async def recv(self) -> VideoFrame:
         if self.readyState != "live":
             raise MediaStreamError
-        if self._thread is None:
-            self._thread = threading.Thread(
-                target=self._decode, args=(asyncio.get_running_loop(),),
-                name="live-decode", daemon=True,
-            )
-            self._thread.start()
+        # Con el lock: `stop` corre en el executor y no debe quedar un hilo
+        # arrancado después de su `join` (decodificaría un contenedor cerrado).
+        # Ninguno de los dos lo retiene más que un instante.
+        with self._lock:
+            if self._container is None:
+                raise MediaStreamError
+            if self._thread is None:
+                self._thread = threading.Thread(
+                    target=self._decode, args=(self._container, asyncio.get_running_loop()),
+                    name="live-decode", daemon=True,
+                )
+                self._thread.start()
         frame = await self._queue.get()
         if frame is None:
             raise MediaStreamError
         return frame
 
-    def _decode(self, loop: asyncio.AbstractEventLoop) -> None:
-        # `stop` cierra el contenedor solo tras `join`: mientras este hilo vive, existe.
-        container = self._container
-        assert container is not None
+    def _decode(self, container: av.container.InputContainer, loop: asyncio.AbstractEventLoop) -> None:
+        # `stop` cierra el contenedor solo tras `join`: mientras este hilo vive, sirve.
         try:
             frames = container.decode(self._stream)
             while not self._quit.is_set():
@@ -499,11 +507,13 @@ class _VideoOnlyTrack(MediaStreamTrack):  # type: ignore[misc]  # aiortc sin tip
         `SourcePool` lo llama desde el executor (ver `_stop_source`)."""
         super().stop()
         self._quit.set()
-        with self._lock:  # idempotente aunque se llame desde dos hilos
-            if self._thread is not None and self._thread is not threading.current_thread():
-                self._thread.join()
-            self._thread = None
+        with self._lock:  # idempotente: solo la primera llamada se lleva hilo y contenedor
+            thread, self._thread = self._thread, None
             container, self._container = self._container, None
+        # Fuera del lock: el `join` puede durar hasta el timeout RTSP y `recv`
+        # (en el loop) no debe esperar por él.
+        if thread is not None and thread is not threading.current_thread():
+            thread.join()
         if container is not None:
             container.close()
 
