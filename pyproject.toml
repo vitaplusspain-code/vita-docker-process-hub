@@ -10,6 +10,10 @@ dependencies = [
     "insightface>=0.7",
     "onnxruntime>=1.18",
     "numpy>=1.26",
+    "aiortc>=1.9",
+    "PyJWT[crypto]>=2.8",
+    "botocore>=1.34",
+    "websockets>=13",
 ]
 
 [project.optional-dependencies]
@@ -41,5 +45,10 @@ strict = true
 
 [[tool.mypy.overrides]]
 module = ["ultralytics.*", "cv2.*", "insightface.*", "onnxruntime.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+module = ["aiortc.*", "av.*", "botocore.*", "aioice.*"]
 ignore_missing_imports = true
 follow_imports = "skip"
