@@ -17,7 +17,8 @@ desincroniza.
 Hasta ahora el principio de producto era "eventos, no vídeo": al cloud solo viajaba texto y la
 app familiar decía expresamente que la cámara nunca envía imágenes. Ese principio ha cambiado.
 El producto quiere que un familiar o cuidador pueda **ver en directo las cámaras del hogar desde
-la app web**, pero solo en las cuentas que el técnico habilite, con consentimiento registrado y
+la app web**, pero solo en las cuentas que el técnico habilite, con el consentimiento de la persona
+observada registrado y
 sin que el vídeo se almacene en ningún sitio.
 
 Hoy no existe nada de esto: el hub solo lee RTSP a ~2 fps para inferencia, la policy de IoT
@@ -31,6 +32,7 @@ reproductor.
 | Desde dónde se ve | Remoto, desde la app web familiar | Es el caso de uso: el familiar no está en casa. |
 | Quién puede ver | Cuentas con relación con la persona (`admin_account_id` o `relationship` `family`/`caregiver`), incluidas las `read_only` | Ver es una lectura. |
 | Puerta de acceso | Flag `account.live_video_enabled`, que activa el técnico | No hay pasarela de pago ni entitlements por `plan_code`; el técnico decide. |
+| Consentimiento | **Por persona observada**, no por cuenta que ve. En v1 se firma en **papel** y el técnico lo registra en la ficha de la persona (`person.live_video_consent_at`) | Quien aparece en el vídeo es la persona mayor: es su consentimiento (o el del titular en su nombre) el que protege. Sin flujo digital de firma todavía. |
 | Exclusividad | **Una sesión por cuenta**; cuentas distintas pueden ver a la vez, incluso la misma cámara | Petición explícita. |
 | Segunda sesión de la misma cuenta | **La nueva expulsa a la anterior** | Evita quedar bloqueado por una pestaña zombi o un móvil perdido. |
 | Forma de la sesión | Una cámara cada vez con selector; 10 min con "Seguir viendo"; sin audio | Limita el uso como vigilancia continua y el ancho de subida del hogar. |
@@ -276,6 +278,11 @@ Según la convención del repo, los roles no se declaran en CDK:
 ```sql
 ALTER TABLE account ADD COLUMN live_video_enabled boolean NOT NULL DEFAULT false;
 
+-- Consentimiento de la persona observada, firmado en papel y registrado por
+-- el técnico. NULL = no consta: nadie puede verla en directo.
+ALTER TABLE person ADD COLUMN live_video_consent_at timestamptz;
+ALTER TABLE person ADD COLUMN live_video_consent_by uuid REFERENCES account(id);
+
 CREATE TABLE live_session (
   account_id  <tipo de account.id> PRIMARY KEY REFERENCES account(id) ON DELETE CASCADE,
   sid         uuid        NOT NULL,
@@ -285,7 +292,10 @@ CREATE TABLE live_session (
 );
 ```
 
-Además, ampliar el `CHECK` de `consent.kind` con `'live_video'`.
+No se toca la tabla `consent`: es por cuenta y registra lo que acepta quien se da de alta,
+no lo que autoriza la persona observada. Si llega un flujo digital de firma, migrará a una tabla
+propia con versión del documento; v1 solo guarda que el contrato en papel existe, quién lo
+registró y cuándo.
 
 ## 6. API (`vita-web-family-app/api`)
 
@@ -294,7 +304,8 @@ Además, ampliar el `CHECK` de `consent.kind` con `'live_video'`.
 | `POST /api/persons/:id/live` | Emite una sesión (§6.1). Devuelve `LiveSessionGrant`. |
 | `GET /api/live/session` | `{sid}` vigente de la cuenta, o `{sid: null}`. Es el polling de 15 s. |
 | `DELETE /api/live/session` | Cierre explícito, best effort. Borra la fila si el `sid` coincide. |
-| `PATCH /api/admin/accounts/:id` | Admite `live_video_enabled`. Solo `is_admin`, con `audit_log`. Rechaza `true` (409 `live_video_consent_missing`) si la cuenta no tiene un `consent` `live_video` vigente (la tabla `consent` ya es por cuenta; si al implementar resulta que no, el plan lo resuelve antes de tocar la API). |
+| `PATCH /api/admin/accounts/:id` | Admite `live_video_enabled`. Solo `is_admin`, con `audit_log`. |
+| `PATCH /api/admin/persons/:id` | Admite `live_video_consent: boolean`. `true` fija `live_video_consent_at = now()` y `live_video_consent_by` = el técnico; `false` los pone a NULL (retirada). Solo `is_admin`, con `audit_log` en ambos sentidos. |
 
 `GET /api/me` añade `live_video_enabled`.
 
@@ -305,8 +316,10 @@ En orden, con la regla actual de 404 en vez de 403 para lo que queda fuera del �
 1. Cuenta `active`; si no, el comportamiento actual de la app.
 2. Relación con la persona (`admin_account_id` o `relationship`); si no, **404**.
 3. `live_video_enabled`; si no, **403** `{"error":"live_video_disabled"}`.
-4. La persona tiene un `device` `kind='hub'`; si no, **404** `{"error":"no_hub"}`.
-5. Firma el token con `kms:Sign` (DER → `r||s`), asume `live-viewer` con una session policy
+4. La persona tiene `live_video_consent_at` no nulo; si no, **403**
+   `{"error":"live_video_no_consent"}`.
+5. La persona tiene un `device` `kind='hub'`; si no, **404** `{"error":"no_hub"}`.
+6. Firma el token con `kms:Sign` (DER → `r||s`), asume `live-viewer` con una session policy
    limitada al canal del hub, hace upsert de `live_session` y escribe en `audit_log`
    (`action='live_session_issued'`, `sid`, `hub_id`).
 
@@ -323,7 +336,8 @@ Respuesta:
 ## 7. Frontend (`vita-web-family-app/frontend`)
 
 - **Pestaña Dispositivos:** sustituye "El estado de la cámara llegará próximamente" por el
-  botón **"Ver cámaras en directo"** si `me.live_video_enabled` y la persona tiene hub. Lleva a
+  botón **"Ver cámaras en directo"** si `me.live_video_enabled`, la persona tiene consentimiento registrado (el estado de la persona
+  expone `live_video_available`) y tiene hub. Lleva a
   `/persons/:id/live`.
 - **`LivePage`:**
   1. `POST /api/persons/:id/live`.
@@ -335,8 +349,11 @@ Respuesta:
   7. Polling de `GET /api/live/session` cada 15 s; si el `sid` difiere, cierra.
   8. Al salir de la página o en `beforeunload`, cierra la conexión y llama a
      `DELETE /api/live/session`.
-- **Panel técnico:** interruptor **"Vídeo en directo"** en la ficha de la cuenta, que muestra el
-  error de consentimiento ausente si el `PATCH` lo rechaza.
+- **Panel técnico:** dos interruptores.
+  - Ficha de la **persona**: **"Vídeo en directo autorizado (contrato firmado)"**, con la fecha y
+    el técnico que lo registró cuando está activo. Al activarlo pide confirmar que el contrato en
+    papel está firmado.
+  - Ficha de la **cuenta**: **"Vídeo en directo"**.
 - **`shared/`:** tipos `LiveSessionGrant`, `LiveControlMessage` y `LiveCloseReason`. El hub, en
   Python, replica el contrato a mano y este spec es la fuente de verdad.
 
@@ -349,14 +366,16 @@ Mensajes:
 | `expired` | "La sesión ha terminado." + botón "Volver a ver" |
 | `camera_unavailable` | "Esta cámara no está disponible ahora." (el selector sigue activo) |
 | `shutdown` o sin conexión al hub en 15 s | "No se puede conectar con el hogar. Comprueba que el equipo está encendido." |
-| `403 live_video_disabled` | Vuelve a Dispositivos. |
+| `403 live_video_disabled` / `403 live_video_no_consent` | Vuelve a Dispositivos. |
 
 Tests: la máquina de estados de `LivePage` va en un reducer puro con tests unitarios; la API,
-con tests de las cuatro comprobaciones de §6.1 y del `PATCH` con y sin consentimiento.
+con tests de las cinco comprobaciones de §6.1 y de los dos `PATCH`.
 
 ## 8. Privacidad
 
-- **Consentimiento:** activar el flag exige un `consent` `live_video` registrado (§6).
+- **Consentimiento de la persona observada:** sin `person.live_video_consent_at` nadie la ve,
+  tenga la cuenta el flag o no. En v1 es un contrato en papel que el técnico registra; retirarlo
+  (`false`) corta la emisión de tokens al instante y las sesiones vivas mueren en ≤ 10 min.
 - **Auditoría doble:** `audit_log` en la nube por cada token emitido, y `live_view_started` /
   `live_view_ended` del hub en `hub-events`. Si alguien ve vídeo, queda constancia en los dos
   lados, y uno no depende del otro.
