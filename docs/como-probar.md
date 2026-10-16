@@ -311,8 +311,8 @@ ni que la regla escriba en DynamoDB. Eso solo se comprueba contra la cuenta real
 
 Solo se comprueba contra la cuenta real; los tests usan señalización y cámaras falsas.
 
-> **Puerta de despliegue.** No actives `live.enabled` en un hogar sin antes (a) ejecutar el spike
-> de CPU del Jetson (Tarea 1 del plan del directo; ver `backlog.md`) y (b) pasar esta prueba con
+> **Puerta de despliegue.** No actives `live.enabled` en un hogar sin antes (a) el spike de CPU
+> del Jetson (hecho el 2026-10-16: pasa, ver spec §4.3) y (b) pasar esta prueba con
 > **una cámara con audio** — la mayoría lo tienen y el directo solo debe pedir el vídeo.
 
 1. **Requisitos:** infra `hub-live` desplegada y el canal del hogar creado (lo hace

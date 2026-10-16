@@ -197,6 +197,30 @@ Jetson con la inferencia corriendo y 1, 2 y 3 viewers. Si no da, el plan B es GS
 `webrtcbin` con H.264 en passthrough (sin recodificar). **El contrato de §3 no cambia** con ese
 cambio de librería.
 
+**Resultado del spike (2026-10-16): `aiortc` pasa.** Jetson Orin del piloto (6 núcleos, modo
+25W), hub de producción corriendo con `person_pose` + caídas a 2 fps sobre una cámara, y un
+proceso aparte con el pipeline real de `live/source.py` (`SourcePool` + `FpsLimitedTrack` +
+`SwitchTrack`, aiortc 1.15, PyAV 17.1) sirviendo el substream 640x360 a 15 fps. Los receptores
+corrían en otro equipo de la LAN, para que el Jetson no pagara la decodificación. Ventanas de
+50 s; CPU total del sistema medida con `tegrastats`:
+
+| Viewers | VP8: sistema (media / máx) | VP8: proceso del directo | H.264: sistema (media / máx) | H.264: proceso del directo |
+|---|---|---|---|---|
+| 0 (base) | 38 % / 43 % | — | 38 % / 43 % | — |
+| 1 | 42 % / 58 % | 16 % de un núcleo | 45 % / 58 % | 32 % |
+| 2 | 45 % / 56 % | 29 % | 50 % / 60 % | 60 % |
+| 3 | 48 % / 58 % | 40 % | 53 % / 60 % | 83 % |
+
+Con 3 viewers el máximo es del 60 %, por debajo del 80 % del criterio. El proceso del hub se
+mantuvo en ~225 % de un núcleo en todas las fases, y el heartbeat siguió llegando cada 5 s sin
+saltos. Coste aproximado por viewer: ~12 % de un núcleo con VP8 y ~27 % con H.264. Decisión:
+**`aiortc`**. Lo que no cubre: varias cámaras vistas a la vez (cada una añade su decodificación)
+ni el camino por TURN.
+
+Observación aparte: los receptores vieron ~11 fps, con una cámara que entrega 15–16 fps. Fue igual
+con 1, 2 o 3 viewers y con los dos códecs, así que no es falta de CPU. Lo más probable es que
+`FpsLimitedTrack` descarte frames que llegan con algo menos de 1/15 s de separación por jitter.
+
 ### 4.4 Config
 
 ```yaml

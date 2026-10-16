@@ -182,9 +182,8 @@ después.
 ### Diferidos del slice de vídeo en directo (2026-10-15)
 
 - **Puerta de despliegue (bloqueante por hogar).** Antes de poner `live.enabled: true` en un
-  hogar: (1) ejecutar el spike de CPU de `aiortc` en el Jetson (Tarea 1 del plan
-  `docs/superpowers/plans/2026-10-15-video-en-directo-hub.md`) y anotar el resultado en el spec
-  §4.3, y (2) hacer la prueba manual de `como-probar.md` §4b con **una cámara con audio**, que es
+  hogar: (1) ~~ejecutar el spike de CPU de `aiortc` en el Jetson~~ — hecho el 2026-10-16, pasa
+  (60 % de CPU máxima con 3 viewers; resultado en el spec §4.3), y (2) hacer la prueba manual de `como-probar.md` §4b con **una cámara con audio**, que es
   el caso de la mayoría y el que rompió la primera versión del opener. Ninguna de las dos se
   puede cubrir con los tests: necesitan el Jetson y una cámara real.
 
