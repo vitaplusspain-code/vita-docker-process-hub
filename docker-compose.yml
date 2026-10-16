@@ -35,5 +35,10 @@ services:
       VITAHUB_IOT_CA: ${VITAHUB_IOT_CA:-/data/certs/AmazonRootCA1.pem}
       VITAHUB_IOT_CERT: ${VITAHUB_IOT_CERT:-/data/certs/certificate.pem.crt}
       VITAHUB_IOT_KEY: ${VITAHUB_IOT_KEY:-/data/certs/private.pem.key}
+      # Vacías por defecto: solo son obligatorias con live.enabled: true, y de
+      # eso ya se queja load_config con un mensaje que dice qué falta.
+      VITAHUB_IOT_CREDENTIALS_ENDPOINT: ${VITAHUB_IOT_CREDENTIALS_ENDPOINT:-}
+      VITAHUB_LIVE_ROLE_ALIAS: ${VITAHUB_LIVE_ROLE_ALIAS:-}
+      VITAHUB_LIVE_CHANNEL_PREFIX: ${VITAHUB_LIVE_CHANNEL_PREFIX:-}
     volumes:
       - ./data:/data
