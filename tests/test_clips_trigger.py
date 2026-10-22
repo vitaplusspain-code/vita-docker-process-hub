@@ -109,8 +109,9 @@ def test_risk_closes_at_10s_and_calls_on_clip() -> None:
     assert req.episode_ids == ["e1"]
     assert req.camera_id == "cam1"
     assert req.camera_name == "Salón"
-    assert req.snapshot.packets[0].t <= 85
-    assert req.clip_start == r.wall_now - timedelta(seconds=110 - 85)
+    assert req.snapshot.packets[0].t == 84  # keyframe anterior a t0 - 15
+    # El clip empieza en su primer paquete, no en t0 - 15.
+    assert req.clip_start == r.wall_now - timedelta(seconds=110 - 84)
     r.tick(111)
     assert len(r.clips) == 1
 
@@ -187,6 +188,43 @@ def test_no_video() -> None:
     assert ev.type == "fall_clip_failed"
     assert ev.payload["reason"] == "no_video"
     assert ev.payload["episode_ids"] == ["e1"]
+
+
+def _buffer_until(end: float) -> PacketBuffer:
+    buf = PacketBuffer()
+    buf.reset(object())
+    t = 0.0
+    while t <= end:
+        buf.append(BufferedPacket(t=t, keyframe=t % 2.0 == 0.0, packet=object()))
+        t += 0.5
+    return buf
+
+
+def test_buffer_parado_no_entrega_video_viejo() -> None:
+    # La cámara dejó de entregar vídeo en t=49.5: lo que queda en el buffer no
+    # es la caída de t=3600.
+    r = _Rig(buffer=_buffer_until(49.5))
+    r.fall(3600)
+    r.tick(3610)
+    assert r.clips == []
+    (ev,) = r.own()
+    assert ev.type == "fall_clip_failed"
+    assert ev.payload["reason"] == "no_video"
+
+
+def test_reset_a_mitad_de_ventana_es_no_video() -> None:
+    # La cámara se reconectó tras la caída: el vídeo nuevo no la contiene.
+    r = _Rig()
+    r.fall(100)
+    r.buffer.reset(object())
+    t = 104.0
+    while t <= 110.0:
+        r.buffer.append(BufferedPacket(t=t, keyframe=t % 2.0 == 0.0, packet=object()))
+        t += 0.5
+    r.tick(110)
+    assert r.clips == []
+    (ev,) = r.own()
+    assert ev.payload["reason"] == "no_video"
 
 
 def test_camera_not_enabled_is_ignored() -> None:

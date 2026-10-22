@@ -163,13 +163,17 @@ class ClipTriggerSink(EventSink):
         start = w.t0 - PRE_S
         buf = self._buffers(w.camera_id)
         snap = buf.snapshot(start, w.deadline) if buf is not None else None
-        if snap is None:
+        # Solo vale un clip que contenga el instante de la caída: un buffer que
+        # dejó de recibir vídeo conserva lo último que vio, y tras una
+        # reconexión a mitad de ventana el vídeo nuevo ya no la incluye.
+        if snap is None or not snap.packets[0].t <= w.t0 <= snap.packets[-1].t:
             self._emit_own(w, "fall_clip_failed", {
                 "episode_ids": list(w.episode_ids),
                 "reason": "no_video",
             })
             return
-        clip_start = self._wall() - timedelta(seconds=now - start)
+        # Fechado por su primer paquete: el keyframe suele caer antes de t0 - 15.
+        clip_start = self._wall() - timedelta(seconds=now - snap.packets[0].t)
         self._on_clip(ClipRequest(
             camera_id=w.camera_id,
             camera_name=w.camera_name,
