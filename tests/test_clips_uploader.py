@@ -170,7 +170,7 @@ def test_resume_after_restart(tmp_path: Path) -> None:
     assert clip.mp4.exists()
 
 
-def test_ignores_orphans_and_partials(tmp_path: Path) -> None:
+def test_deletes_orphans_and_partials(tmp_path: Path) -> None:
     root = tmp_path / "pending"
     root.mkdir()
     (root / "a.mp4.part").write_bytes(b"x")
@@ -184,7 +184,9 @@ def test_ignores_orphans_and_partials(tmp_path: Path) -> None:
     (root / "e.mp4").write_bytes(b"x")
     queue = PendingQueue(root)
     assert queue.oldest() is None
-    assert not list(root.glob("*.part"))
+    # Nada de esto se subirá nunca ni lo alcanzaría expire(): se borra para
+    # que no pase de 3 días en el hogar.
+    assert list(root.iterdir()) == []
 
 
 def test_mux_error_emits_failed(tmp_path: Path) -> None:

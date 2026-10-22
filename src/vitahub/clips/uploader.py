@@ -90,7 +90,7 @@ class PendingQueue:
     Cada clip son dos ficheros (`<uuid>.mp4` y `<uuid>.json`). El JSON se
     escribe el último y con renombrado atómico, así que su presencia indica que
     el clip está completo; un `.part` o un fichero sin pareja es resto de un
-    corte a medias y no se sube.
+    corte a medias: no se sube y se borra al arrancar.
     """
 
     def __init__(
@@ -119,15 +119,21 @@ class PendingQueue:
                 clip = PendingClip(mp4=mp4, **data)
                 _validate(clip)
             except Exception:  # noqa: BLE001 — un JSON corrupto no debe impedir arrancar la cola
-                _log.exception("metadatos de clip ilegibles, se ignoran: %s", meta)
+                # Sin metadatos válidos no se sube nunca ni lo alcanza expire():
+                # se borra para que no pase de 3 días en el hogar.
+                _log.exception("metadatos de clip ilegibles, se borra el clip: %s", meta)
+                meta.unlink(missing_ok=True)
+                mp4.unlink(missing_ok=True)
                 continue
             if not mp4.exists():
-                _log.warning("metadatos sin MP4, se ignoran: %s", meta)
+                _log.warning("metadatos sin MP4, se borran: %s", meta)
+                meta.unlink(missing_ok=True)
                 continue
             clips.append(clip)
         for mp4 in self._root.glob("*.mp4"):
             if not mp4.with_suffix(".json").exists():
-                _log.warning("MP4 sin metadatos, se ignora: %s", mp4)
+                _log.warning("MP4 sin metadatos, se borra: %s", mp4)
+                mp4.unlink(missing_ok=True)
         clips.sort(key=lambda c: c.created_at)
         return clips
 

@@ -197,15 +197,42 @@ class ClipService:
                 _log.warning("el hilo %s no terminó a tiempo en el apagado", t.name)
 
 
+def _purge_pending(pending_dir: Path) -> None:
+    """Borra la cola de clips que dejó un arranque anterior con clips activos.
+
+    Apagar los clips es retirar el consentimiento (spec §3.4): esos clips no
+    se subirán nunca y, sin uploader, tampoco caducarían, cuando nada debe
+    pasar de 3 días en el hogar (§10).
+    """
+    if not pending_dir.is_dir():
+        return
+    try:
+        files = [f for f in pending_dir.iterdir() if f.is_file()]
+        if not files:
+            return
+        n = sum(1 for f in files if f.suffix == ".mp4")
+        _log.warning(
+            "clips.enabled es false: se borran %d clips pendientes de subir en %s "
+            "(retirada del consentimiento)",
+            n,
+            pending_dir,
+        )
+        for f in files:
+            f.unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001 — un fallo borrando no debe impedir arrancar el hub
+        _log.exception("no se pudo vaciar la cola de clips en %s", pending_dir)
+
+
 def build_clip_service(
     cfg: HubConfig, inner: EventSink, pending_dir: Path = Path("/data/clips-pending")
 ) -> ClipService | None:
-    """Los clips de caída, o None si `clips.enabled` es false.
+    """Los clips de caída, o None si `clips.enabled` es false (y entonces vacía la cola).
 
     Como el directo, no conecta nada aquí: la primera llamada a AWS ocurre en
     el hilo de subida, con reintento.
     """
     if not cfg.clips.enabled:
+        _purge_pending(pending_dir)
         return None
     clips = cfg.clips
     # Mismo caso que en `build_live_service`: un PEM ilegible revienta aquí y

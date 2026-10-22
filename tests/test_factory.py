@@ -250,6 +250,32 @@ def test_build_clip_service_none_when_disabled(tmp_path):
     assert not (tmp_path / "q").exists()
 
 
+def test_build_clip_service_disabled_purges_pending_clips(tmp_path, caplog):
+    # Apagar los clips es retirar el consentimiento (spec §3.4): lo que quedara
+    # en la cola no se sube nunca y no puede pasar de 3 días en el hogar.
+    q = tmp_path / "q"
+    q.mkdir()
+    for name in ("a", "b"):
+        (q / f"{name}.mp4").write_bytes(b"x")
+        (q / f"{name}.json").write_text("{}")
+    (q / "c.mp4.part").write_bytes(b"x")
+    with caplog.at_level(logging.WARNING, logger="factory"):
+        assert build_clip_service(_hub_config(), StdoutJsonSink(), q) is None
+    assert list(q.iterdir()) == []
+    messages = [r.getMessage() for r in caplog.records]
+    assert len(messages) == 1
+    assert "2 clips" in messages[0]
+    assert "clips.enabled" in messages[0]
+
+
+def test_build_clip_service_disabled_with_empty_queue_is_silent(tmp_path, caplog):
+    q = tmp_path / "q"
+    q.mkdir()
+    with caplog.at_level(logging.WARNING, logger="factory"):
+        assert build_clip_service(_hub_config(), StdoutJsonSink(), q) is None
+    assert caplog.records == []
+
+
 def test_build_clip_service_bad_pem_is_config_error(tmp_path):
     # Mismo caso que el del directo: los clips sacan sus credenciales con el
     # certificado del uplink, y un PEM ilegible debe decir qué revisar.
