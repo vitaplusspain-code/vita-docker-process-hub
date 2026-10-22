@@ -171,7 +171,7 @@ def test_clip_event_shape():
     - `submit(request: ClipRequest) -> None`: hace `queue.add`; emite `fall_clip_failed` `queue_full` por cada expulsado o `mux_error` si `add` falló. Se llama desde el hilo del trigger.
     - `run_once() -> bool`: `expire()` (emite `expired`), toma `oldest()` y llama a `put`; éxito → `remove` y `fall_clip_ready` con `episode_ids`, `s3_key`, `sha256`, `duration_s`, `clip_start`; devuelve `True` si subió. `UploadRejected` → `fall_clip_failed` `upload_rejected` **una vez por clip** y lo deja en la cola.
     - `run(stop: threading.Event) -> None`: bucle con `stop.wait(backoff_delay(attempt))` tras un fallo y `stop.wait(1.0)` con la cola vacía.
-  - `s3_put(bucket: str, region: str, creds: IotCredentialsProvider) -> Callable[[str, Path, dict[str, str]], None]`: cliente `botocore` `s3` creado con `creds.get()` en cada llamada (las credenciales rotan), `put_object(Bucket, Key, Body, ContentType="video/mp4", Metadata=...)`; `ClientError` con `HTTPStatusCode == 403` → `UploadRejected`. Runtime only, sin test.
+  - `s3_put(bucket: str, region: str, creds: IotCredentialsProvider) -> Callable[[str, Path, dict[str, str]], None]`: cliente `botocore` `s3` creado con `creds.get()` en cada llamada (las credenciales rotan), `put_object(Bucket, Key, Body, ContentType="video/mp4", Metadata=..., IfNoneMatch="*")`; `ClientError` con `HTTPStatusCode == 412` → **retorno normal** (ya estaba subido, spec §3.1); con `403` → `UploadRejected`. Runtime only, sin test.
   - Metadatos S3: `episode-ids` (separados por coma), `camera-id`, `clip-start`, `sha256`.
 
 - [ ] **Step 1: Write the failing tests** (`ClipRequest` real con un `Snapshot` de la Tarea 4; `put` falso; reloj inyectado)
@@ -217,7 +217,7 @@ def test_clip_event_shape():
 
 - [ ] **Step 1: Write the failing tests** (reutiliza `_write` y los helpers de `live`): `test_clips_defaults_disabled`, `test_clips_valid`, `test_clips_requires_uplink`, `test_clips_requires_fall`, `test_clips_requires_cameras`, `test_clips_requires_env[var]` parametrizado con las tres variables, `test_clips_section_must_be_mapping`.
 - [ ] **Step 2: Run** `pytest tests/test_config.py -v -k clips` → FAIL
-- [ ] **Step 3: Implement** y añade a `config/hub.example.yaml` el bloque `clips:` del spec §4.6 con comentarios en el estilo de `live:` (incluido "opt-in por cámara: deja fuera la del baño" y las dos variables de entorno).
+- [ ] **Step 3: Implement** y añade a `config/hub.example.yaml` el bloque `clips:` del spec §5.6 con comentarios en el estilo de `live:` (incluido "opt-in por cámara: deja fuera la del baño" y las dos variables de entorno).
 - [ ] **Step 4: Run** `pytest tests/test_config.py -v` → PASS
 - [ ] **Step 5: Commit** `feat(clips): sección clips de la config`
 
@@ -252,11 +252,11 @@ def test_clip_event_shape():
 **Files:**
 - Modify: `docs/como-funciona.md`, `docs/como-probar.md`, `docs/backlog.md`
 
-- [ ] **Step 1:** `como-funciona.md`: corrige la frase de la introducción (líneas 9-12) con la excepción del clip de caída con riesgo; añade `clips/` a la vista general y a la tabla de módulos; una sección "Clip de caída" con el criterio de §3 del spec, la ventana, la retención (30 días en S3, 3 en el hogar) y los tres eventos.
+- [ ] **Step 1:** `como-funciona.md`: corrige la frase de la introducción (líneas 9-12) con la excepción del clip de caída con riesgo; añade `clips/` a la vista general y a la tabla de módulos; una sección "Clip de caída" con el criterio de §4 del spec, la ventana, la retención (30 días en S3, 3 en el hogar) y los tres eventos.
 - [ ] **Step 2:** `como-probar.md`: prueba manual contra la cuenta real (cámara en `clips.cameras`, tirarse al suelo y quedarse 15 s → `fall_clip_ready` y objeto en S3; levantarse a los 3 s → `fall_clip_discarded` `got_up`; tumbarse despacio → `slow`; cortar internet → el clip queda en `/data/clips-pending/` y sube al volver). Actualiza el recuento de tests de la checklist.
-- [ ] **Step 3:** `backlog.md`: sección "Diferidos del slice de clip de caída (2026-10-22)" con los cuatro puntos de §9 del spec y la verificación pendiente del pipeline `hub-events` en el repo de infra.
+- [ ] **Step 3:** `backlog.md`: sección "Diferidos del slice de clip de caída (2026-10-22)" con los puntos de §13 del spec.
 - [ ] **Step 4: Commit** `docs: clip de caída con riesgo`
 
 ---
 
-Fuera de este plan: la infra de §5 del spec (repo `vitaplus-aws-architecture`, plan propio). Sin ella el hub funciona igual, pero las subidas acaban en `upload_rejected`.
+Fuera de este plan: la infra de §6 del spec (repo `vitaplus-aws-architecture`, plan propio). Sin ella el hub funciona igual, pero las subidas acaban en `upload_rejected`.
