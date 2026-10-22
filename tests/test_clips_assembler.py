@@ -58,3 +58,31 @@ def test_assemble_cleans_partial_file_on_error(tmp_path):
     with pytest.raises(Exception):  # noqa: B017 — cualquier fallo de PyAV/tipos
         assemble_mp4(bad, out)
     assert not out.exists()
+
+
+def _bframe_snapshot(tmp_path):
+    src = tmp_path / "bf.mp4"
+    try:
+        write_test_video(src, codec="libx264", options={"bf": "2"})
+    except Exception:  # noqa: BLE001 — build de PyAV sin libx264
+        pytest.skip("libx264 no disponible")
+    return snapshot_from_file(src)
+
+
+@pytest.mark.parametrize("start", [0, 1])
+def test_assemble_keeps_bframe_delay(tmp_path, start):
+    snap = _bframe_snapshot(tmp_path)
+    assert any(p.packet.dts < p.packet.pts for p in snap.packets)  # hay B-frames
+    if start:  # recorte desde un keyframe intermedio
+        i = [n for n, p in enumerate(snap.packets) if p.keyframe][1]
+        snap = Snapshot(snap.template, snap.packets[i:])
+    out = tmp_path / "clip.mp4"
+
+    assemble_mp4(snap, out)
+
+    with av.open(str(out)) as c:
+        st = c.streams.video[0]
+        pkts = [p for p in c.demux(st) if p.size]
+        assert all(p.dts <= p.pts for p in pkts)
+    with av.open(str(out)) as c:
+        assert sum(1 for _ in c.decode(video=0)) == len(snap.packets)

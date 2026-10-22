@@ -49,10 +49,11 @@ def _remux(snapshot: Snapshot, out_path: Path) -> None:
         if not isinstance(bp.packet, av.Packet):
             raise TypeError(f"se esperaba av.Packet, llegó {type(bp.packet).__name__}")
         packets.append(bp.packet)
-    # Sin dts válido (algunos paquetes lo traen a None) el desfase se toma del pts.
+    # Un único desfase para pts y dts: con B-frames el primer dts es negativo
+    # (retardo de reordenado) y rebasarlos por separado dejaría pts < dts, que
+    # el muxer rechaza. Sin dts en el primer paquete se toma el pts.
     first = packets[0]
-    base_pts = first.pts if first.pts is not None else first.dts
-    base_dts = first.dts if first.dts is not None else first.pts
+    base = first.dts if first.dts is not None else first.pts
     with av.open(str(out_path), "w", format="mp4", options={"movflags": "+faststart"}) as out:
         stream = out.add_stream_from_template(snapshot.template)
         for src in packets:
@@ -60,7 +61,7 @@ def _remux(snapshot: Snapshot, out_path: Path) -> None:
             pkt.time_base = src.time_base
             pkt.duration = src.duration
             pkt.is_keyframe = src.is_keyframe
-            pkt.pts = None if src.pts is None or base_pts is None else src.pts - base_pts
-            pkt.dts = None if src.dts is None or base_dts is None else src.dts - base_dts
+            pkt.pts = None if src.pts is None or base is None else src.pts - base
+            pkt.dts = None if src.dts is None or base is None else src.dts - base
             pkt.stream = stream
             out.mux(pkt)
