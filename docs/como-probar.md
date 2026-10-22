@@ -6,6 +6,7 @@ Cuatro niveles, de más rápido a más real:
 2. **Arranque local en seco** (detector `stub`) — confirma que el proceso arranca y descubre.
 3. **Extremo a extremo con cámara real** — ver eventos `person_detected` de verdad.
 4. **Uplink a AWS** — confirmar que los eventos también llegan a la cuenta real (opcional).
+5. **Clip de caída** — confirmar que un clip con riesgo llega a S3 (opcional, §4c).
 
 Para entender qué hace por dentro, ver [como-funciona.md](como-funciona.md).
 
@@ -20,7 +21,7 @@ pip install -e ".[dev]"
 pytest -v
 ```
 
-Deberías ver **317 tests en verde**. Además, las mismas puertas que corren en CI:
+Deberías ver **560 tests en verde**. Además, las mismas puertas que corren en CI:
 
 ```bash
 ruff check src tests scripts
@@ -44,9 +45,13 @@ Los tests cubren toda la **lógica pura y determinista**, sin red ni hardware:
   de episodio con reloj inyectado y poses sintéticas), `test_pose_detector.py` (mapeo de resultados
   Ultralytics falsos a `Detection` con `keypoints`) y `test_replay_video.py` (el CLI de calibración
   sobre frames sintéticos).
+- Clips de caída: el criterio de riesgo (`assess`), el buffer de paquetes (recorte a 45 s, arranque
+  en keyframe), el disparador con reloj inyectado (ventana, segundo episodio, apagado), el remux a
+  MP4 con un stream H.264 sintético, la cola y el uploader con un cliente S3 falso (reintento sin
+  red, tope de 200 MB, caducidad, 403) y los fail-fast de la config.
 
 **No se cubren en CI (por diseño):** el descubrimiento ONVIF real por multicast, la captura RTSP con
-OpenCV, la conexión MQTT real contra AWS IoT Core y el rendimiento real de `yolo11n-pose` en el Orin
+OpenCV, la lectura RTSP real del grabador de clips, la subida real a S3, la conexión MQTT real contra AWS IoT Core y el rendimiento real de `yolo11n-pose` en el Orin
 — necesitan una LAN, una cámara, una cuenta AWS o el hardware del Jetson. Eso se valida a mano (paso
 3, «Uplink a AWS» y «Calibrar caídas con un vídeo» más abajo); el coste de `yolo11n-pose` con 4
 cámaras en Orin se mide en campo y se anota aquí cuando haya datos (ver también
@@ -344,6 +349,37 @@ Solo se comprueba contra la cuenta real; los tests usan señalización y cámara
 
 ---
 
+## 4c. Clip de caída (opcional)
+
+Solo se comprueba contra la cuenta real; los tests usan paquetes sintéticos y un cliente S3 falso.
+
+> **Puerta de despliegue.** Activa `clips.enabled` en un hogar solo con el consentimiento de clips
+> de la persona ya registrado en el panel del técnico.
+
+**Requisitos:** infra `hub-clips` desplegada (repo de arquitectura; sin ella las subidas acaban en
+`upload_rejected`); `uplink.enabled: true` e `inference.fall.enabled: true` con `detector:
+person_pose`; en `hub.yaml`, `clips.enabled: true` y `clips.cameras` con el id de la cámara de
+prueba; y las variables `VITAHUB_CLIPS_BUCKET`, `VITAHUB_CLIPS_ROLE_ALIAS` y
+`VITAHUB_IOT_CREDENTIALS_ENDPOINT`. En el arranque, `docker logs` dice `clips de caída habilitados
+para N cámaras (bucket ...)`.
+
+1. **Caída con riesgo:** tírate al suelo de golpe delante de la cámara y quédate 15 s. Unos 12 s
+   después aparece `fall_clip_ready` y el objeto `{hub_id}/{camera_id}/{episode_id}.mp4` en S3.
+   Descárgalo: debe durar ~25 s, con ~15 s antes de la caída, y verse bien.
+2. **Te levantas:** cáete y levántate en ≤ 3 s → `fall_clip_discarded` con `reason: "got_up"`, y
+   nada en S3 ni en `/data/clips-pending/`.
+3. **Tumbarse despacio:** túmbate despacio en el suelo → `fall_clip_discarded` con `reason:
+   "slow"`.
+4. **Sin internet:** corta la red del Jetson y repite el punto 1 → el clip queda en
+   `/data/clips-pending/` (un `.mp4` y un `.json`) y el hub sigue detectando. Al volver la red, sube,
+   sale `fall_clip_ready` y la carpeta se vacía.
+5. **Apagado:** `docker stop` con una ventana abierta (a los pocos segundos de caerte) →
+   `fall_clip_failed` con `reason: "shutdown"` y nada escrito en `/data/clips-pending/`.
+6. **Eventos esperados** (severidad `info`): los tres `fall_clip_*` en `docker logs` y en la tabla
+   `hub-events`; ninguno notifica a la familia.
+
+---
+
 ## 5. Administración del técnico
 
 Página web local para enrolar personas y ajustar caídas/identidad sin tocar YAML ni la terminal —
@@ -410,8 +446,9 @@ token; `/api/*` sí, siempre.
 
 ## Verificación previa a integrar (checklist)
 
-- [ ] `pytest -v` → 317 verdes.
+- [ ] `pytest -v` → 560 verdes.
 - [ ] `ruff check src tests scripts` y `mypy` limpios.
 - [ ] Arranque en seco (`stub`): descubre o avisa de 0 cámaras, sin caerse.
 - [ ] Extremo a extremo con cámara real: `person_detected` al entrar y `person_absent` al salir.
+- [ ] (Si se activan clips) prueba manual de §4c: `fall_clip_ready` con objeto en S3, `got_up`, `slow` y cola sin internet.
 - [ ] Conectar una cámara con el hub ya corriendo: aparece sola en ≤60 s (o al instante con `POST /rescan`), sin reiniciar el contenedor.

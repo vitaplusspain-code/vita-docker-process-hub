@@ -265,6 +265,37 @@ Hasta ahora solo vivían fuera del repo; se escriben aquí re-verificados contra
   pista sin identificar". El código hace lo contrario en ambos: `self._engine.extract(frame)` pasa
   el frame entero, y la cadencia se lleva por cámara (`_last_attempt[camera_id]`), no por pista.
 
+### Diferidos del slice de clip de caída (2026-10-22)
+
+Del spec (§13):
+
+- **Desmayo lento:** una persona que se desploma despacio no supera `RISK_MIN_DROP` y no genera
+  clip, aunque siga en el suelo. Revisar con los datos de `fall_clip_discarded`.
+- **Calibrar `RISK_MIN_DROP` (0.5)** con `scripts/replay_video.py` sobre vídeos reales antes del
+  piloto.
+- **Notificar a la familia** que hay vídeo, cuando exista un consumidor del SNS de alertas.
+- **Borrar los clips de una persona al retirar su consentimiento**, sin esperar al lifecycle de 30
+  días.
+- **CloudTrail con data events** de lectura del bucket, como segundo rastro independiente de la
+  API, y una bucket policy que niegue `GetObject` a todo lo que no sea la Lambda de la app (con un
+  acceso de emergencia).
+- **Varios clips por alerta** (`detail.clips` como lista) si en el piloto aparecen alertas con dos
+  caídas grabadas.
+- **Cifrar la cola de pendientes** (`/data/clips-pending`) si se cifra el resto de `/data`.
+
+De la implementación:
+
+- **Cámaras que envían RTCP/keepalives sin vídeo no disparan el timeout de lectura:** el grabador
+  no se entera de que el stream está parado y el buffer se queda obsoleto, así que un clip podría
+  salir sin cobertura (`no_video`) o con vídeo antiguo. Hace falta un watchdog por último paquete
+  de vídeo, no por actividad del socket.
+- **Un `OSError` al crear `/data/clips-pending` sale como traceback** en vez de como `ConfigError`
+  con mensaje legible (disco de solo lectura, permisos).
+- **El formateador de logs JSON solo redacta los secretos registrados en el mensaje, no en los
+  tracebacks de excepción.** El grabador de clips lo esquiva logueando sin traceback, pero otros
+  módulos que usen `_log.exception` pueden filtrar URIs RTSP con credenciales. Redactar también el
+  campo de excepción en `logging_setup.py`.
+
 ## Verificación pendiente en hardware real
 Las partes de red (descubrimiento ONVIF, captura RTSP) no corren en CI por diseño. Validar
 extremo-a-extremo contra una cámara real: `docker compose up` con la credencial del hogar y

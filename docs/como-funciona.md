@@ -8,9 +8,11 @@ convertirse en un evento. Para instalar o probar, ver [como-probar.md](como-prob
 `vitahub` es una aplicación Python que corre como **un contenedor Docker en un mini-PC/Jetson dentro
 de cada hogar**. Se conecta a las cámaras IP de la casa, convierte el vídeo en **eventos** (p. ej.
 "ha entrado una persona") y los emite como texto. El vídeo se procesa en el hogar y al exterior
-salen eventos de texto. La única excepción es el vídeo en directo: bajo demanda, para cuentas
-habilitadas por el técnico con consentimiento, por WebRTC y sin almacenarse nunca (ver «Vídeo en
-directo» más abajo).
+salen eventos de texto. Hay dos excepciones: el vídeo en directo (bajo demanda, para cuentas
+habilitadas por el técnico con consentimiento, por WebRTC y sin almacenarse nunca; ver «Vídeo en
+directo» más abajo) y el clip de una caída con riesgo (se sube a S3 y se guarda 30 días, con
+consentimiento propio y opt-in por cámara; ver «Clip de caída» más abajo). Ningún otro vídeo sale
+del hogar.
 
 Alcance de esta versión (primer slice): **descubrimiento de cámaras + ingesta RTSP + detección de
 persona (presencia y conteo) + eventos JSON por stdout**, con un **uplink opcional a AWS IoT Core**
@@ -46,6 +48,10 @@ persona (presencia y conteo) + eventos JSON por stdout**, con un **uplink opcion
                                                          │  stdout JSON │   AWS opcional)
                                                          └──────────────┘
 ```
+
+En paralelo a ese flujo, si `clips.enabled`, un grabador por cámara (`clips/`) guarda en memoria
+los últimos ~45 s de paquetes de vídeo, y un decorador del sink (`ClipTriggerSink`) vigila los
+eventos `fall_*` para decidir si una caída con riesgo merece un clip (ver «Clip de caída»).
 
 Dos ideas de diseño que conviene retener:
 
@@ -91,7 +97,15 @@ Dos ideas de diseño que conviene retener:
 | `live/source.py` | Destinos en directo por cámara, pool de fuentes RTSP compartidas, limitador de fps, `SwitchTrack` por conexión y pista en reposo. |
 | `live/peer.py` | `ViewerPeer`: una `RTCPeerConnection` por viewer con su DataChannel. |
 | `live/service.py` | `LiveService`: orquesta todo; `start()`/`stop()`. |
-| `factory.py` | Construye el `Detector` según la config (`stub` / `person_yolo` / `person_pose`), el `EventSink` según `uplink.enabled`, el `FaceIdentifier` (`build_face_identifier`) según `inference.identity.enabled` y el `LiveService` (`build_live_service`) según `live.enabled`. |
+| `clips/constants.py` | Constantes del clip: `PRE_S`, `POST_S`, `MAX_POST_S`, `BUFFER_S`, `RISK_MIN_DROP`, `PENDING_MAX_MB`, `PENDING_MAX_AGE_S`. |
+| `clips/risk.py` | `assess`: el criterio de riesgo (`risk` / `slow` / `got_up`). Pura. |
+| `clips/buffer.py` | `PacketBuffer`: últimos 45 s de paquetes de vídeo por cámara; siempre arranca en keyframe. |
+| `clips/recorder.py` | `record`: hilo por cámara que lee el RTSP con PyAV sin decodificar y llena el buffer. |
+| `clips/trigger.py` | `ClipTriggerSink`: decorador del sink; abre y cierra ventanas, evalúa el riesgo y emite `fall_clip_discarded`/`fall_clip_failed`. |
+| `clips/assembler.py` | Remux de los paquetes a un MP4 (sin recodificar) y su sha256. |
+| `clips/uploader.py` | `PendingQueue` (cola en disco) y `ClipUploader`: sube a S3 con reintentos y emite `fall_clip_ready`/`fall_clip_failed`. |
+| `clips/events.py` | Construcción de los eventos `fall_clip_*`. |
+| `factory.py` | Construye el `Detector` según la config (`stub` / `person_yolo` / `person_pose`), el `EventSink` según `uplink.enabled`, el `FaceIdentifier` (`build_face_identifier`) según `inference.identity.enabled` y el `LiveService` (`build_live_service`) según `live.enabled` y el `ClipService` (`build_clip_service`) según `clips.enabled`. |
 | `worker.py` | `process_frame`: detecta, cuenta, alimenta el motor de presencia y, si hay `fall_engine` y `tracker`, orquesta pistas + identidad (`identifier`) + caídas; emite por el sink. |
 | `logging_setup.py` | Logs JSON a **stderr** + redacción de secretos. |
 
@@ -281,7 +295,7 @@ canal se llama `<prefijo>-<hub_id>`, por lo que con `live.enabled` el `hub_id` n
   (5 s), que van en serie, antes de que Docker mande `SIGKILL`.
 - Ante `SIGTERM`/`SIGINT` se activa un `Event` de parada y `_shutdown` cierra en orden, con cada paso
   garantizado aunque falle el anterior: control HTTP, **directo** (avisa a sus viewers con
-  `closed:shutdown` y emite sus `live_view_ended`), workers de cámara y, por último, el sink — por
+  `closed:shutdown` y emite sus `live_view_ended`), workers de cámara, los hilos de clips (tick y subida, plazo de 5 s) y, por último, el sink — que es el `ClipTriggerSink`, y al cerrarse emite el `fall_clip_failed` de `shutdown` de las ventanas abiertas antes de cerrar el sink interno — por
   eso el directo va antes: sus eventos de cierre salen por el sink.
 
 ## El envelope de evento
@@ -422,6 +436,111 @@ anónima para siempre, así que mientras esté en cámara la extracción sigue c
 cámara indefinidamente; un backoff para pistas que llevan mucho sin matchear queda para más
 adelante.
 
+## Clip de caída
+
+Cuando una caída **tiene riesgo**, el hub monta un clip MP4 de ese momento y lo sube a S3 como
+prueba. Es el único vídeo que el producto almacena (el directo nunca lo hace). Solo se activa con
+`clips.enabled: true`, con consentimiento propio de la persona (registrado en el panel del técnico
+**antes** de activarlo) y solo en las cámaras listadas en `clips.cameras`: dejar una cámara fuera
+(p. ej. la del baño) es no grabarla.
+
+### Qué es una caída con riesgo
+
+Un episodio tiene riesgo si se cumplen las dos condiciones (`clips/risk.py`):
+
+1. **No fue un tumbarse despacio:** el `signals.drop_speed` del `fall_detected` es **≥ 0.5** alturas
+   de caja por segundo (`RISK_MIN_DROP`) **o es `null`** (el hub no vio la bajada: ante la duda se
+   conserva).
+2. **No se ha levantado:** al cerrarse la ventana de 10 s, no ha llegado `fall_resolved` con
+   `reason: "upright"` para ese episodio. Un cierre por `track_lost` **sí cuenta como riesgo**: la
+   persona puede estar en el suelo detrás de un mueble.
+
+Se usa `drop_speed` y no el `score` porque el score no separa bien los dos casos (una persona ya
+tumbada da ~0.79 y otra que se tumba despacio, ~0.55; el término del tiempo en el suelo sube solo).
+`inference.fall.min_score` no cambia: sigue gobernando los eventos de texto.
+
+### La ventana
+
+Un grabador por cámara habilitada (`clips/recorder.py`) abre el RTSP con PyAV (TCP, solo vídeo, sin
+audio) y guarda en memoria los paquetes **sin decodificar**, los últimos 45 s. Es una conexión RTSP
+más por cámara, igual que el directo. Al llegar un `fall_detected`:
+
+- el clip cubre **15 s antes** (`PRE_S`) y **10 s después** (`POST_S`) de la caída;
+- solo hay una ventana por cámara. Si llega otra caída mientras está abierta, se asocia al mismo
+  clip y la ventana se alarga hasta 10 s después de ella, con tope de **30 s** de post-roll en total
+  (`MAX_POST_S`). El clip tiene riesgo si **alguno** de sus episodios lo tiene;
+- la decisión se toma ~12 s después de llegar al suelo (2 s de confirmación más los 10 s de
+  ventana), así que para cerrarse como `upright` dentro de ella la persona debe estar de pie como
+  mucho a los ~8 s.
+
+`ClipTriggerSink.emit` no hace trabajo pesado (corre en el hilo de la cámara); un hilo propio cierra
+las ventanas.
+
+### Sin riesgo: no queda nada
+
+Si el episodio no tiene riesgo, el clip se descarta **en memoria** y no se escribe ni un byte a
+disco. Solo sale un evento de texto, `fall_clip_discarded`, que además sirve para calibrar
+`RISK_MIN_DROP` con datos reales sin enviar vídeo.
+
+### Con riesgo: cola, subida y reintentos
+
+1. Se monta el MP4 (remux, sin recodificar) y se guarda en la cola `/data/clips-pending/` (un `.mp4`
+   y un `.json` de metadatos por clip). La cola tiene tope de **200 MB** (`PENDING_MAX_MB`): si no
+   cabe uno nuevo se borra el más antiguo (`queue_full`). Un clip con más de **3 días** se borra sin
+   subir (`expired`).
+2. `ClipUploader` lo sube a S3 con `PutObject` e `If-None-Match: *`, de modo que reintentar no
+   duplica ni pisa (un 412 se toma como «ya estaba subido»). La clave es
+   `{hub_id}/{camera_id}/{episode_id}.mp4` con el primer `episode_id`, y lleva de metadatos
+   `episode-ids`, `camera-id`, `clip-start` y `sha256`. Las credenciales son temporales, vía IoT
+   credentials provider con el role alias de clips y el certificado del uplink.
+3. Sin internet reintenta con backoff; el fichero local se borra solo tras la subida confirmada. Al
+   arrancar, reanuda lo que quedara en la carpeta.
+4. **Un 403** no se reintenta en bucle: se avisa una sola vez (`upload_rejected`) y el clip sigue en
+   la cola, reintentándose con el backoff máximo, porque suele ser infra a medio desplegar. Sin la
+   infra de S3, las subidas acaban en `upload_rejected`.
+
+Los 30 días de retención cuentan desde la subida (lifecycle de S3); con los 3 días máximos en la
+cola, un clip existe como mucho 33 días desde la caída.
+
+### Los tres eventos
+
+Todos con severidad `info` y el `camera_id` de la cámara del clip. `episode_ids` es una lista (un
+clip puede cubrir dos caídas) y no se llama `episode_id` a propósito, para que nada que lea
+`payload.episode_id` los confunda con un evento de episodio.
+
+| Tipo | Payload | Cuándo |
+|---|---|---|
+| `fall_clip_ready` | `episode_ids`, `s3_key`, `sha256`, `duration_s`, `clip_start` | Tras confirmar la subida |
+| `fall_clip_discarded` | `episode_ids`, `drop_speed`, `reason` (`slow` \| `got_up`) | Al cerrar la ventana sin riesgo |
+| `fall_clip_failed` | `episode_ids`, `reason` (`no_video` \| `mux_error` \| `queue_full` \| `expired` \| `upload_rejected` \| `shutdown`) | Un clip con riesgo no va a llegar a S3 |
+
+### Apagado
+
+Una ventana abierta al parar el hub se descarta sin escribir nada y emite `fall_clip_failed` con
+`reason: "shutdown"`: no se puede saber si había riesgo, y un clip sin riesgo confirmado no sale de
+casa. Los clips ya montados en la cola se conservan y se suben en el siguiente arranque. Primero se paran los hilos de clips (tick y subida, con un plazo de 5 s; son
+*daemon*, así que una subida colgada en la red no bloquea el apagado) y después se cierra el
+`ClipTriggerSink`, que emite ese evento antes de cerrar el sink interno para que llegue a salir.
+
+### Aislamiento y configuración
+
+Ningún fallo de `clips/` llega al hilo de cámara ni al sink de texto: el recorder y el uploader
+corren en sus propios hilos con captura de excepciones y log.
+
+```yaml
+clips:
+  enabled: false     # requiere uplink.enabled e inference.fall.enabled
+  cameras: []        # ids de cámara con clips; opt-in explícito por cámara
+  region: eu-west-1
+```
+
+Con `enabled: true` hacen falta `VITAHUB_CLIPS_BUCKET`, `VITAHUB_CLIPS_ROLE_ALIAS` (las imprime
+`provision-hub.sh`) y `VITAHUB_IOT_CREDENTIALS_ENDPOINT` (la misma del directo). El hub **no
+arranca** (código 1) si falta `uplink.enabled`, `inference.fall.enabled`, `cameras` o alguna
+variable. Un id de `cameras` aún desconocido no es error (la sección se autopuebla al descubrir):
+solo se avisa en cada rescan. Con `inference.stream: main` el buffer pesa 22-45 MB por cámara y cada
+clip 12-25 MB (el substream, 3-6 MB, basta para ver la caída), y el hub lo avisa al arrancar.
+
 ## Administración local (la página del técnico)
 
 `control.py` sirve, en el mismo servidor HTTP del rescan, una página estática en `GET /` (pública,
@@ -481,6 +600,10 @@ inference:
 uplink:
   enabled: false             # true para publicar los eventos en AWS IoT Core (ver más abajo)
   topic_prefix: vita/hub
+clips:
+  enabled: false             # true para subir a S3 el clip de una caída con riesgo (ver «Clip de caída»)
+  cameras: []                # ids de cámara con clips; opt-in por cámara
+  region: eu-west-1
 cameras: []                 # se autopobla al descubrir
 ```
 
@@ -502,6 +625,9 @@ cameras: []                 # se autopobla al descubrir
 | `VITAHUB_IOT_CA` | `/data/certs/AmazonRootCA1.pem` | CA raíz para el TLS mutuo. |
 | `VITAHUB_IOT_CERT` | `/data/certs/certificate.pem.crt` | Certificado del hogar. |
 | `VITAHUB_IOT_KEY` | `/data/certs/private.pem.key` | Clave privada del hogar. |
+| `VITAHUB_CLIPS_BUCKET` | — (obligatoria si `clips.enabled`) | Bucket S3 de los clips de caída. |
+| `VITAHUB_CLIPS_ROLE_ALIAS` | — (obligatoria si `clips.enabled`) | Role alias de IoT para las credenciales de subida. |
+| `VITAHUB_IOT_CREDENTIALS_ENDPOINT` | — (obligatoria si `live.enabled` o `clips.enabled`) | Endpoint del credentials provider de IoT. |
 
 ## Empaquetado y despliegue
 
