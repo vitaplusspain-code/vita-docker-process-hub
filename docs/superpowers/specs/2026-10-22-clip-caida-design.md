@@ -90,7 +90,7 @@ la ventana, la persona tiene que estar de pie como muy tarde a los ~8 s, porque 
 
 ```
 cámara ──RTSP──► ClipRecorder (hilo por cámara, PyAV, sin decodificar)
-                   └─ buffer en memoria con los últimos ~30 s de paquetes de vídeo
+                   └─ buffer en memoria con los últimos ~45 s de paquetes de vídeo
 
 FallEngine ──fall_detected──► sink normal ──► ClipTriggerSink
                                                  ├─ congela los 15 s anteriores
@@ -108,7 +108,7 @@ FallEngine ──fall_detected──► sink normal ──► ClipTriggerSink
 
 | Pieza | Responsabilidad |
 |---|---|
-| `clips/recorder.py` — `ClipRecorder` | Un hilo por cámara habilitada. Lo arranca la función `worker(camera, rtsp_url, cam_stop)` de `app.py` junto a `_camera_loop`, con la misma `rtsp_url` y el mismo `cam_stop`: así el `CameraSupervisor` ya gestiona altas, bajas y cambios de URI sin cableado nuevo. Abre esa URI con PyAV (`rtsp_transport=tcp`, solo vídeo, como `live/source.py`) y **no decodifica**: guarda los paquetes con su instante de llegada (`time.monotonic()`) en un buffer acotado a `BUFFER_S = 30` s. Al recortar, nunca deja el buffer empezando en un paquete que no sea keyframe. Reconecta con `backoff_delay`/`next_attempt` de `ingest/rtsp.py`. `snapshot(start, end)` devuelve los paquetes de ese intervalo, empezando en el keyframe anterior a `start`. |
+| `clips/recorder.py` — `ClipRecorder` | Un hilo por cámara habilitada. Lo arranca la función `worker(camera, rtsp_url, cam_stop)` de `app.py` junto a `_camera_loop`, con la misma `rtsp_url` y el mismo `cam_stop`: así el `CameraSupervisor` ya gestiona altas, bajas y cambios de URI sin cableado nuevo. Abre esa URI con PyAV (`rtsp_transport=tcp`, solo vídeo, como `live/source.py`) y **no decodifica**: guarda los paquetes con su instante de llegada (`time.monotonic()`) en un buffer acotado a `BUFFER_S = 45` s (el clip más largo posible: 15 s de pre-roll más 30 s de post-roll). Al recortar, nunca deja el buffer empezando en un paquete que no sea keyframe. Reconecta con `backoff_delay`/`next_attempt` de `ingest/rtsp.py`. `snapshot(start, end)` devuelve los paquetes de ese intervalo, empezando en el keyframe anterior a `start`. |
 | `clips/trigger.py` — `ClipTriggerSink(EventSink)` | Se añade al `FanoutSink`. Ignora todo salvo `fall_detected` y `fall_resolved`. Con `fall_detected` de una cámara habilitada abre una ventana para ese `episode_id` (instante de disparo = `time.monotonic()` al recibir el evento). Con `fall_resolved` anota el `reason` del episodio. Un temporizador cierra cada ventana a los `POST_S = 10` s y llama al evaluador. **No hace trabajo pesado en `emit`**: el `emit` corre en el hilo de la cámara. |
 | `clips/risk.py` | Función pura `assess(drop_speed: float \| None, resolved_reason) -> Literal["risk", "slow", "got_up"]`. Es lo único que codifica §3. |
 | `clips/assembler.py` | Remux de los paquetes a un MP4 (`av.open(..., "w")`, `add_stream_from_template`, `movflags=+faststart`), sin recodificar. Calcula el sha256. |
@@ -117,7 +117,7 @@ FallEngine ──fall_detected──► sink normal ──► ClipTriggerSink
 Una sola ventana por cámara a la vez: si llega otro `fall_detected` de la misma cámara mientras su
 ventana está abierta, no se abre otra. El episodio nuevo se asocia al clip en curso y la ventana
 se **alarga hasta 10 s después de ese último `fall_detected`**, con un tope de 30 s de post-roll
-en total (así cabe en el buffer). Si no, un episodio que entra a los 8 s nunca podría cerrarse
+en total (así cabe en el buffer de 45 s). Si no, un episodio que entra a los 8 s nunca podría cerrarse
 como `got_up`. El clip tiene riesgo si **alguno** de sus episodios lo tiene. El evento resultante
 lleva la lista de `episode_ids`.
 
@@ -157,8 +157,8 @@ No se toca `_camera_loop`.
 
 ### 4.5 Memoria y CPU
 
-Con el substream a ~0,5–1 Mbps, 30 s de buffer son entre 2 y 4 MB por cámara. Con
-`inference.stream: main` (4–8 Mbps) son 15–30 MB por cámara y cada clip pesa 12–25 MB, así que la
+Con el substream a ~0,5–1 Mbps, 45 s de buffer son entre 3 y 6 MB por cámara. Con
+`inference.stream: main` (4–8 Mbps) son 22–45 MB por cámara y cada clip pesa 12–25 MB, así que la
 cola de 200 MB admite menos clips. Se permite igualmente: "su stream" es el que analiza el hub,
 sea cual sea. El hub loguea un aviso al arrancar si `clips.enabled` y `stream: main` coinciden. El recorder solo
 demultiplexa, no decodifica: su CPU es despreciable frente a los ~12 % de núcleo por viewer que
@@ -213,7 +213,7 @@ familia; la alerta sigue siendo `fall_detected`.
 - `trigger.py`: reloj inyectado. Ventana que cierra a los 10 s; `fall_resolved` antes y después
   del cierre; segundo episodio que alarga la ventana y tope de 30 s; apagado con ventana abierta;
   cámara no habilitada; eventos ajenos ignorados; `emit` que no bloquea.
-- Buffer del recorder con paquetes sintéticos: recorte a 30 s, arranque siempre en keyframe,
+- Buffer del recorder con paquetes sintéticos: recorte a 45 s, arranque siempre en keyframe,
   `snapshot` sobre un intervalo sin vídeo.
 - `assembler.py`: remux de un stream H.264 sintético generado con PyAV en el test; el MP4
   resultante se abre y tiene la duración esperada.
