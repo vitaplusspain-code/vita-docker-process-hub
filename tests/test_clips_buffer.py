@@ -103,3 +103,31 @@ def test_reset_drops_old_stream() -> None:
     old_ids = {id(p.packet) for p in old}
     assert all(id(p.packet) not in old_ids for p in snap.packets)
     assert snap.packets[0].t == 100.0
+
+
+def test_clear_vacia_paquetes_y_plantilla() -> None:
+    tpl = object()
+    buf = PacketBuffer()
+    buf.reset(tpl)
+    for p in _stream(0.0, 10.0):
+        buf.append(p)
+    buf.clear(tpl)
+    assert buf.snapshot(0.0, 1e9) is None
+    # Sin plantilla no se acepta nada hasta el siguiente reset().
+    buf.append(BufferedPacket(t=20.0, keyframe=True, packet=object()))
+    buf.reset(object())
+    assert buf.snapshot(0.0, 1e9) is None
+
+
+def test_clear_de_un_grabador_viejo_no_toca_el_buffer_del_nuevo() -> None:
+    old, new = object(), object()
+    buf = PacketBuffer()
+    buf.reset(old)
+    buf.reset(new)
+    for p in _stream(0.0, 10.0):
+        buf.append(p)
+    buf.clear(old)
+    snap = buf.snapshot(0.0, 1e9)
+    assert snap is not None
+    assert snap.template is new
+    assert len(snap.packets) == 20

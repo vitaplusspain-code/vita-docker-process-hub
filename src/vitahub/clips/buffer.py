@@ -46,8 +46,25 @@ class PacketBuffer:
             self._packets.clear()
             self._template = template
 
+    def clear(self, template: object) -> None:
+        """Vacía paquetes y plantilla al desconectar el grabador dueño de `template`.
+
+        Un buffer sin vídeo nuevo no debe seguir entregando los últimos 45 s
+        como si fueran de ahora. Soltar la plantilla además deja que el
+        contenedor se libere cuando ningún Snapshot en curso la use. Si la
+        plantilla vigente ya es otra, el buffer es de un grabador más nuevo (el
+        supervisor reinició el worker) y no se toca.
+        """
+        with self._lock:
+            if self._template is not template:
+                return
+            self._packets.clear()
+            self._template = None
+
     def append(self, p: BufferedPacket) -> None:
         with self._lock:
+            if self._template is None:
+                return  # sin plantilla no hay con qué montar un clip
             if not self._packets and not p.keyframe:
                 return  # sin keyframe inicial no hay nada decodificable
             self._packets.append(p)

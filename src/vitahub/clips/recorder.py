@@ -38,29 +38,52 @@ def record(
     """
     attempt = 0
     while not stop.is_set():
-        container = None
-        try:
-            container = av.open(
-                uri, format=format, options=_RTSP_OPTIONS if options is None else options
-            )
-            video = container.streams.video[0]
-            # El stream nuevo tiene otros parámetros y base de tiempos: nada del
-            # anterior se puede mezclar con él.
-            buffer.reset(video)
-            for packet in container.demux(video):
-                if stop.is_set():
-                    return
-                if packet.size > 0:
-                    buffer.append(BufferedPacket(monotonic(), packet.is_keyframe, packet))
-                    attempt = 0  # conectó y entrega vídeo: el siguiente fallo parte de cero
-            _log.warning("fin del stream de la cámara; se reintenta")
-        except Exception as exc:  # noqa: BLE001 — el hilo grabador no puede morir por un fallo de red o de códec
-            _log.warning("fallo grabando la cámara; se reintenta: %s", _safe_error(exc, uri))
-        finally:
-            if container is not None:
-                try:
-                    container.close()
-                except Exception as exc:  # noqa: BLE001 — cerrar un contenedor roto no debe romper el bucle
-                    _log.warning("no se pudo cerrar el contenedor de la cámara: %s", _safe_error(exc, uri))
+        if _session(uri, buffer, stop, format, options, monotonic):
+            attempt = 0  # conectó y entregó vídeo: el siguiente fallo parte de cero
         stop.wait(backoff_delay(attempt))
         attempt = next_attempt(attempt)
+
+
+def _session(
+    uri: str,
+    buffer: PacketBuffer,
+    stop: threading.Event,
+    format: str | None,
+    options: dict[str, str] | None,
+    monotonic: Callable[[], float],
+) -> bool:
+    """Una conexión, hasta su fin por EOF, error o `stop`; devuelve si entregó vídeo.
+
+    El contenedor no se cierra a mano: el stream es la plantilla del buffer y
+    un Snapshot en curso puede seguir montando un MP4 con ella, y montar con la
+    plantilla de un contenedor cerrado es un segfault de PyAV. Al salir se vacía
+    el buffer y, al morir este marco, se sueltan contenedor, stream y
+    generador de demux; el contenedor se libera (y cierra) en cuanto el último
+    Snapshot que lo usa desaparece. Por el ciclo contenedor-stream de PyAV eso
+    lo hace el recolector cíclico de Python, no el recuento de referencias.
+    """
+    delivered = False
+    video = None
+    try:
+        container = av.open(uri, format=format, options=_RTSP_OPTIONS if options is None else options)
+        video = container.streams.video[0]
+        if stop.is_set():
+            # Al supervisor le dio tiempo a arrancar otro grabador mientras
+            # este abría: el buffer ya es del nuevo y no se le cambia la plantilla.
+            return False
+        # El stream nuevo tiene otros parámetros y base de tiempos: nada del
+        # anterior se puede mezclar con él.
+        buffer.reset(video)
+        for packet in container.demux(video):
+            if stop.is_set():
+                return delivered
+            if packet.size > 0:
+                buffer.append(BufferedPacket(monotonic(), packet.is_keyframe, packet))
+                delivered = True
+        _log.warning("fin del stream de la cámara; se reintenta")
+    except Exception as exc:  # noqa: BLE001 — el hilo grabador no puede morir por un fallo de red o de códec
+        _log.warning("fallo grabando la cámara; se reintenta: %s", _safe_error(exc, uri))
+    finally:
+        if video is not None:
+            buffer.clear(video)
+    return delivered
