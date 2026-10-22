@@ -81,6 +81,49 @@ def test_grabador_parado_durante_open_no_sustituye_la_plantilla(
     assert snap is not None and snap.template is current
 
 
+def test_cada_sesion_cierra_su_contenedor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Una sesión RTSP sin cerrar ocupa una plaza en la cámara hasta que pase el
+    # GC: tras un cambio de URI el worker nuevo podría no conectar.
+    path = tmp_path / "v.mkv"
+    write_test_video(path)
+    real_open = recorder_mod.av.open
+    closed: list[bool] = []
+
+    class _Spy:
+        def __init__(self, container: object) -> None:
+            self._c = container
+            closed.append(False)
+            self._i = len(closed) - 1
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._c, name)
+
+        def close(self) -> None:
+            closed[self._i] = True
+            self._c.close()  # type: ignore[attr-defined]
+
+    def spy_open(*args: object, **kwargs: object) -> object:
+        container = real_open(*args, **kwargs)  # type: ignore[call-overload]
+        # Solo las conexiones de entrada: la copia de la plantilla también usa
+        # av.open (un contenedor de salida en memoria, sin socket).
+        return _Spy(container) if isinstance(args[0], str) else container
+
+    monkeypatch.setattr(recorder_mod.av, "open", spy_open)
+    buffer = _SpyBuffer()
+    stop = threading.Event()
+    thread = threading.Thread(
+        target=record, args=(str(path), buffer, stop), kwargs={"format": None, "options": {}}, daemon=True
+    )
+    thread.start()
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and not buffer.before_clear:
+        time.sleep(0.02)
+    stop.set()
+    thread.join(timeout=2.0)
+    assert not thread.is_alive()
+    assert closed and all(closed)
+
+
 # Un segfault no es una excepción: el montaje se ejecuta en un subproceso.
 _ASSEMBLE_AFTER_DISCONNECT = """
 import gc, sys, threading

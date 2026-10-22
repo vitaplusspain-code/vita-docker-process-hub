@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,6 +19,20 @@ class ClipFile:
     path: Path
     sha256: str
     duration_s: float
+
+
+def detach_template(stream: object) -> object:
+    """Copia de la plantilla de un stream que no depende de su contenedor.
+
+    Montar con la plantilla de un contenedor ya cerrado es un segfault de PyAV,
+    pero el grabador tiene que cerrar el suyo en cuanto termina la sesión: si
+    no, la conexión RTSP sigue ocupando una plaza en la cámara hasta que pase
+    el recolector cíclico de Python. La copia vive en un contenedor de salida
+    en memoria que nunca se escribe; no tiene socket, así que da igual cuándo
+    se libere, y vive mientras algún Snapshot la referencie.
+    """
+    holder = av.open(io.BytesIO(), "w", format="mp4")
+    return holder.add_stream_from_template(stream)
 
 
 def assemble_mp4(snapshot: Snapshot, out_path: Path) -> ClipFile:

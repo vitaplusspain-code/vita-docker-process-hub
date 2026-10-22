@@ -7,6 +7,7 @@ from collections.abc import Callable
 
 import av
 
+from vitahub.clips.assembler import detach_template
 from vitahub.clips.buffer import BufferedPacket, PacketBuffer
 from vitahub.ingest.rtsp import backoff_delay, next_attempt, strip_credentials
 from vitahub.live.source import _RTSP_OPTIONS
@@ -54,16 +55,14 @@ def _session(
 ) -> bool:
     """Una conexión, hasta su fin por EOF, error o `stop`; devuelve si entregó vídeo.
 
-    El contenedor no se cierra a mano: el stream es la plantilla del buffer y
-    un Snapshot en curso puede seguir montando un MP4 con ella, y montar con la
-    plantilla de un contenedor cerrado es un segfault de PyAV. Al salir se vacía
-    el buffer y, al morir este marco, se sueltan contenedor, stream y
-    generador de demux; el contenedor se libera (y cierra) en cuanto el último
-    Snapshot que lo usa desaparece. Por el ciclo contenedor-stream de PyAV eso
-    lo hace el recolector cíclico de Python, no el recuento de referencias.
+    El buffer guarda una copia de la plantilla independiente del contenedor
+    (`detach_template`), así que el contenedor se cierra al terminar la sesión:
+    la cámara recibe el cierre y libera la plaza RTSP al momento, y un Snapshot
+    en curso puede seguir montando su MP4.
     """
     delivered = False
-    video = None
+    container = None
+    template = None
     try:
         container = av.open(uri, format=format, options=_RTSP_OPTIONS if options is None else options)
         video = container.streams.video[0]
@@ -73,7 +72,8 @@ def _session(
             return False
         # El stream nuevo tiene otros parámetros y base de tiempos: nada del
         # anterior se puede mezclar con él.
-        buffer.reset(video)
+        template = detach_template(video)
+        buffer.reset(template)
         for packet in container.demux(video):
             if stop.is_set():
                 return delivered
@@ -84,6 +84,11 @@ def _session(
     except Exception as exc:  # noqa: BLE001 — el hilo grabador no puede morir por un fallo de red o de códec
         _log.warning("fallo grabando la cámara; se reintenta: %s", _safe_error(exc, uri))
     finally:
-        if video is not None:
-            buffer.clear(video)
+        if template is not None:
+            buffer.clear(template)
+        if container is not None:
+            try:
+                container.close()
+            except Exception as exc:  # noqa: BLE001 — cerrar no puede tumbar el hilo grabador
+                _log.warning("fallo cerrando la conexión de la cámara: %s", _safe_error(exc, uri))
     return delivered
