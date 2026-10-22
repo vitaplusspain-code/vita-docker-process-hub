@@ -29,10 +29,12 @@ def detach_template(stream: object) -> object:
     no, la conexión RTSP sigue ocupando una plaza en la cámara hasta que pase
     el recolector cíclico de Python. La copia vive en un contenedor de salida
     en memoria que nunca se escribe; no tiene socket, así que da igual cuándo
-    se libere, y vive mientras algún Snapshot la referencie.
+    se libere, y vive mientras algún Snapshot la referencie. `opaque=True`
+    reutiliza el decodificador del stream: copiar paquetes no necesita un
+    codificador de H.264/HEVC, que el build de FFmpeg podría no traer.
     """
     holder = av.open(io.BytesIO(), "w", format="mp4")
-    return holder.add_stream_from_template(stream)
+    return holder.add_stream_from_template(stream, opaque=True)
 
 
 def assemble_mp4(snapshot: Snapshot, out_path: Path) -> ClipFile:
@@ -70,8 +72,10 @@ def _remux(snapshot: Snapshot, out_path: Path) -> None:
     first = packets[0]
     base = first.dts if first.dts is not None else first.pts
     with av.open(str(out_path), "w", format="mp4", options={"movflags": "+faststart"}) as out:
-        stream = out.add_stream_from_template(snapshot.template)
+        stream = out.add_stream_from_template(snapshot.template, opaque=True)
         for src in packets:
+            # `src.stream` apunta al contenedor de la cámara, que el grabador ya
+            # puede haber cerrado: solo se leen campos del propio paquete.
             pkt = av.Packet(bytes(src))
             pkt.time_base = src.time_base
             pkt.duration = src.duration
