@@ -292,7 +292,8 @@ canal se llama `<prefijo>-<hub_id>`, por lo que con `live.enabled` el `hub_id` n
   carga de YOLO y un primer descubrimiento lento no cuenten como fallo antes de que el
   hub llegue a latir. Al apagar, `docker-compose.yml` fija `stop_grace_period: 45s` —
   margen por encima del plazo de apagado de los hilos de cámara (20 s) más el del directo
-  (5 s), que van en serie, antes de que Docker mande `SIGKILL`.
+  (5 s) más el de los hilos de clips (5 s), que van en serie (30 s), antes de que Docker mande
+  `SIGKILL`.
 - Ante `SIGTERM`/`SIGINT` se activa un `Event` de parada y `_shutdown` cierra en orden, con cada paso
   garantizado aunque falle el anterior: control HTTP, **directo** (avisa a sus viewers con
   `closed:shutdown` y emite sus `live_view_ended`), workers de cámara, los hilos de clips (tick y subida, plazo de 5 s) y, por último, el sink — que es el `ClipTriggerSink`, y al cerrarse emite el `fall_clip_failed` de `shutdown` de las ventanas abiertas antes de cerrar el sink interno — por
@@ -444,6 +445,10 @@ prueba. Es el único vídeo que el producto almacena (el directo nunca lo hace).
 **antes** de activarlo) y solo en las cámaras listadas en `clips.cameras`: dejar una cámara fuera
 (p. ej. la del baño) es no grabarla.
 
+**Retirar el consentimiento** es poner `clips.enabled: false`. Al arrancar así, el hub borra entera
+la cola `/data/clips-pending/` (con un aviso en el log que dice cuántos clips borra y por qué): esos
+clips ya no se subirán y, sin el hilo de subida, tampoco caducarían.
+
 ### Qué es una caída con riesgo
 
 Un episodio tiene riesgo si se cumplen las dos condiciones (`clips/risk.py`):
@@ -463,7 +468,9 @@ tumbada da ~0.79 y otra que se tumba despacio, ~0.55; el término del tiempo en 
 
 Un grabador por cámara habilitada (`clips/recorder.py`) abre el RTSP con PyAV (TCP, solo vídeo, sin
 audio) y guarda en memoria los paquetes **sin decodificar**, los últimos 45 s. Es una conexión RTSP
-más por cámara, igual que el directo. Al llegar un `fall_detected`:
+más por cámara, igual que el directo. Si la cámara se desconecta (fin del stream o error), el
+buffer se vacía: lo que queda en él es siempre vídeo de la conexión actual. Al llegar un
+`fall_detected`:
 
 - el clip cubre **15 s antes** (`PRE_S`) y **10 s después** (`POST_S`) de la caída;
 - solo hay una ventana por cámara. Si llega otra caída mientras está abierta, se asocia al mismo
@@ -474,7 +481,9 @@ más por cámara, igual que el directo. Al llegar un `fall_detected`:
   mucho a los ~8 s.
 
 `ClipTriggerSink.emit` no hace trabajo pesado (corre en el hilo de la cámara); un hilo propio cierra
-las ventanas.
+las ventanas. Un clip solo se monta si su vídeo contiene el instante de la caída: si la cámara dejó
+de entregar vídeo antes o se reconectó dentro de la ventana, sale `fall_clip_failed` con `reason:
+"no_video"`.
 
 ### Sin riesgo: no queda nada
 
@@ -494,10 +503,14 @@ disco. Solo sale un evento de texto, `fall_clip_discarded`, que además sirve pa
    `episode-ids`, `camera-id`, `clip-start` y `sha256`. Las credenciales son temporales, vía IoT
    credentials provider con el role alias de clips y el certificado del uplink.
 3. Sin internet reintenta con backoff; el fichero local se borra solo tras la subida confirmada. Al
-   arrancar, reanuda lo que quedara en la carpeta.
+   arrancar, reanuda lo que quedara en la carpeta; los restos de un corte a medias (un `.mp4` sin su
+   `.json`, un `.json` sin `.mp4` o con metadatos ilegibles) se borran.
 4. **Un 403** no se reintenta en bucle: se avisa una sola vez (`upload_rejected`) y el clip sigue en
    la cola, reintentándose con el backoff máximo, porque suele ser infra a medio desplegar. Sin la
-   infra de S3, las subidas acaban en `upload_rejected`.
+   infra de S3 no suele salir `upload_rejected`: sin el role alias falla el credentials provider y
+   sin el bucket S3 responde 404; ambos son fallos genéricos que solo se loguean (`fallo subiendo
+   clip, se reintenta`) y se reintentan con backoff, sin evento, hasta que el clip caduca
+   (`expired`).
 
 Los 30 días de retención cuentan desde la subida (lifecycle de S3); con los 3 días máximos en la
 cola, un clip existe como mucho 33 días desde la caída.

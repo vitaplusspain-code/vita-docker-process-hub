@@ -1,12 +1,13 @@
 # Cómo probar el hub
 
-Cuatro niveles, de más rápido a más real:
+Cuatro niveles, de más rápido a más real, y dos pruebas opcionales que se apoyan en el uplink:
 
 1. **Tests automáticos** — verifican la lógica; no necesitan cámara ni Docker.
 2. **Arranque local en seco** (detector `stub`) — confirma que el proceso arranca y descubre.
 3. **Extremo a extremo con cámara real** — ver eventos `person_detected` de verdad.
 4. **Uplink a AWS** — confirmar que los eventos también llegan a la cuenta real (opcional).
-5. **Clip de caída** — confirmar que un clip con riesgo llega a S3 (opcional, §4c).
+   - **4b. Vídeo en directo** — confirmar que el técnico ve una cámara en directo (opcional).
+   - **4c. Clip de caída** — confirmar que un clip con riesgo llega a S3 (opcional).
 
 Para entender qué hace por dentro, ver [como-funciona.md](como-funciona.md).
 
@@ -21,7 +22,7 @@ pip install -e ".[dev]"
 pytest -v
 ```
 
-Deberías ver **560 tests en verde**. Además, las mismas puertas que corren en CI:
+Deberías ver **568 tests en verde**. Además, las mismas puertas que corren en CI:
 
 ```bash
 ruff check src tests scripts
@@ -356,8 +357,8 @@ Solo se comprueba contra la cuenta real; los tests usan paquetes sintéticos y u
 > **Puerta de despliegue.** Activa `clips.enabled` en un hogar solo con el consentimiento de clips
 > de la persona ya registrado en el panel del técnico.
 
-**Requisitos:** infra `hub-clips` desplegada (repo de arquitectura; sin ella las subidas acaban en
-`upload_rejected`); `uplink.enabled: true` e `inference.fall.enabled: true` con `detector:
+**Requisitos:** infra `hub-clips` desplegada (repo de arquitectura; sin ella las subidas fallan y
+se reintentan sin evento, ver «Clip de caída» en [como-funciona.md](como-funciona.md)); `uplink.enabled: true` e `inference.fall.enabled: true` con `detector:
 person_pose`; en `hub.yaml`, `clips.enabled: true` y `clips.cameras` con el id de la cámara de
 prueba; y las variables `VITAHUB_CLIPS_BUCKET`, `VITAHUB_CLIPS_ROLE_ALIAS` y
 `VITAHUB_IOT_CREDENTIALS_ENDPOINT`. En el arranque, `docker logs` dice `clips de caída habilitados
@@ -366,7 +367,8 @@ para N cámaras (bucket ...)`.
 1. **Caída con riesgo:** tírate al suelo de golpe delante de la cámara y quédate 15 s. Unos 12 s
    después aparece `fall_clip_ready` y el objeto `{hub_id}/{camera_id}/{episode_id}.mp4` en S3.
    Descárgalo: debe durar ~25 s, con ~15 s antes de la caída, y verse bien.
-2. **Te levantas:** cáete y levántate en ≤ 3 s → `fall_clip_discarded` con `reason: "got_up"`, y
+2. **Te levantas:** cáete y levántate a los 2-3 s (con menos de 2 s no llega a haber
+   `fall_detected`) → `fall_clip_discarded` con `reason: "got_up"`, y
    nada en S3 ni en `/data/clips-pending/`.
 3. **Tumbarse despacio:** túmbate despacio en el suelo → `fall_clip_discarded` con `reason:
    "slow"`.
