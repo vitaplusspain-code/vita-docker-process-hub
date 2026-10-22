@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import uuid
@@ -9,12 +10,13 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from vitahub.clips.assembler import assemble_mp4
 from vitahub.clips.constants import PENDING_MAX_AGE_S, PENDING_MAX_MB
 from vitahub.clips.events import clip_event
 from vitahub.clips.trigger import ClipRequest
-from vitahub.ingest.rtsp import backoff_delay, next_attempt
+from vitahub.ingest.rtsp import MAX_BACKOFF_ATTEMPT, backoff_delay, next_attempt
 from vitahub.live.credentials import IotCredentialsProvider
 from vitahub.logging_setup import get_logger
 from vitahub.sinks.base import EventSink
@@ -24,6 +26,22 @@ _log = get_logger("clips.uploader")
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _write_durable(path: Path, data: bytes) -> None:
+    """Escribe y fuerza a disco: un corte no debe dejar un .json válido junto a un .mp4 truncado."""
+    with path.open("wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def _fsync(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 class UploadRejected(Exception):
@@ -45,6 +63,25 @@ class PendingClip:
     @property
     def meta(self) -> Path:
         return self.mp4.with_suffix(".json")
+
+
+def _validate(clip: PendingClip) -> None:
+    """Un JSON bien formado pero con tipos erróneos se descarta en el escaneo, no al subir."""
+    ok = (
+        isinstance(clip.key, str)
+        and isinstance(clip.camera_id, str)
+        and isinstance(clip.camera_name, str)
+        and isinstance(clip.episode_ids, list)
+        and bool(clip.episode_ids)
+        and all(isinstance(e, str) for e in clip.episode_ids)
+        and isinstance(clip.clip_start, str)
+        and isinstance(clip.sha256, str)
+        and isinstance(clip.duration_s, (int, float))
+        and isinstance(clip.created_at, (int, float))
+        and not isinstance(clip.created_at, bool)
+    )
+    if not ok:
+        raise ValueError("campos con tipo inválido")
 
 
 class PendingQueue:
@@ -79,7 +116,8 @@ class PendingQueue:
             mp4 = meta.with_suffix(".mp4")
             try:
                 data = json.loads(meta.read_text())
-                clip = PendingClip(mp4=mp4, **{**data, "episode_ids": list(data["episode_ids"])})
+                clip = PendingClip(mp4=mp4, **data)
+                _validate(clip)
             except Exception:  # noqa: BLE001 — un JSON corrupto no debe impedir arrancar la cola
                 _log.exception("metadatos de clip ilegibles, se ignoran: %s", meta)
                 continue
@@ -103,6 +141,7 @@ class PendingQueue:
         meta_part = self._root / f"{name}.json.part"
         try:
             clip_file = assemble_mp4(request.snapshot, part)
+            _fsync(part)
             part.rename(mp4)
             clip = PendingClip(
                 mp4=mp4,
@@ -117,7 +156,7 @@ class PendingQueue:
             )
             data = asdict(clip)
             del data["mp4"]
-            meta_part.write_text(json.dumps(data))
+            _write_durable(meta_part, json.dumps(data).encode())
             meta_part.rename(meta)
         except Exception:  # noqa: BLE001 — el llamador emite mux_error; aquí solo se limpia
             _log.exception("no se pudo montar el clip de %s", request.camera_id)
@@ -211,23 +250,31 @@ class ClipUploader:
         )
 
     def submit(self, request: ClipRequest) -> None:
-        clip, evicted = self._queue.add(request, self._hub_id)
-        if clip is None:
-            self._emit(
-                request.camera_id,
-                request.camera_name,
-                "fall_clip_failed",
-                {"episode_ids": request.episode_ids, "reason": "mux_error"},
-            )
-        for old in evicted:
-            self._failed(old, "queue_full")
+        # Corre en el hilo del trigger: nada de aquí puede propagarse.
+        try:
+            clip, evicted = self._queue.add(request, self._hub_id)
+            if clip is None:
+                self._emit(
+                    request.camera_id,
+                    request.camera_name,
+                    "fall_clip_failed",
+                    {"episode_ids": request.episode_ids, "reason": "mux_error"},
+                )
+            for old in evicted:
+                self._failed(old, "queue_full")
+        except Exception:  # noqa: BLE001 — un fallo de clips no debe llegar al hilo del trigger
+            _log.exception("fallo encolando el clip de %s", request.camera_id)
 
     def run_once(self) -> bool:
+        """True si subió un clip. Un fallo transitorio de `put` se propaga."""
+        return self._attempt() == "uploaded"
+
+    def _attempt(self) -> Literal["uploaded", "empty", "rejected"]:
         for expired in self._queue.expire():
             self._failed(expired, "expired")
         clip = self._queue.oldest()
-        if clip is None or clip.key in self._rejected:
-            return False
+        if clip is None:
+            return "empty"
         metadata = {
             "episode-ids": ",".join(clip.episode_ids),
             "camera-id": clip.camera_id,
@@ -237,9 +284,13 @@ class ClipUploader:
         try:
             self._put(clip.key, clip.mp4, metadata)
         except UploadRejected:
-            self._rejected.add(clip.key)
-            self._failed(clip, "upload_rejected")
-            return False
+            # Se avisa una vez por clip, pero se sigue reintentando (spec §5.4):
+            # el 403 suele ser de permisos y se arregla sin tocar el hub.
+            if clip.key not in self._rejected:
+                self._rejected.add(clip.key)
+                self._failed(clip, "upload_rejected")
+            return "rejected"
+        self._rejected.discard(clip.key)
         self._queue.remove(clip)
         self._emit(
             clip.camera_id,
@@ -253,23 +304,24 @@ class ClipUploader:
                 "clip_start": clip.clip_start,
             },
         )
-        return True
+        return "uploaded"
 
     def run(self, stop: threading.Event) -> None:
         attempt = 0
         while not stop.is_set():
             try:
-                if self._queue.oldest() is None:
-                    self.run_once()  # solo caduca; no hay nada que subir
-                    stop.wait(1.0)
-                    continue
-                if self.run_once():
-                    attempt = 0
-                    continue
+                result = self._attempt()
             except Exception:  # noqa: BLE001 — el hilo de subida no puede morir
                 _log.exception("fallo subiendo clip, se reintenta")
-            attempt = next_attempt(attempt)
-            stop.wait(backoff_delay(attempt))
+                attempt = next_attempt(attempt)
+                stop.wait(backoff_delay(attempt))
+                continue
+            if result == "uploaded":
+                attempt = 0
+            elif result == "empty":
+                stop.wait(1.0)
+            else:
+                stop.wait(backoff_delay(MAX_BACKOFF_ATTEMPT))
 
 
 def s3_put(

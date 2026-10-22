@@ -88,16 +88,50 @@ def test_transient_failure_keeps_clip_and_retries(tmp_path: Path) -> None:
     assert queue.oldest() is None
 
 
-def test_rejected_emits_once_and_keeps_clip(tmp_path: Path) -> None:
+def test_rejected_emits_once_keeps_clip_and_retries(tmp_path: Path) -> None:
     put = _Put(UploadRejected("403"))
     up, queue, sink, _ = _make(tmp_path, put)
     up.submit(_request(tmp_path))
     assert up.run_once() is False
     assert up.run_once() is False
+    assert len(put.calls) == 2
     failed = [e for e in sink.events if e.type == "fall_clip_failed"]
     assert len(failed) == 1 and failed[0].payload["reason"] == "upload_rejected"
     assert queue.oldest() is not None
-    assert len(put.calls) == 1
+    put.error = None
+    assert up.run_once() is True
+    types = [e.type for e in sink.events]
+    assert types == ["fall_clip_failed", "fall_clip_ready"]
+
+
+def test_submit_never_raises(tmp_path: Path) -> None:
+    up, _, _, _ = _make(tmp_path, _Put())
+
+    class _Boom(_Sink):
+        def emit(self, event: Event) -> None:
+            raise RuntimeError("sink roto")
+
+    up._sink = _Boom()
+    req = _request(tmp_path)
+    broken = ClipRequest(
+        camera_id="cam1",
+        camera_name="n",
+        episode_ids=["e"],
+        clip_start=req.clip_start,
+        snapshot=type(req.snapshot)(template=req.snapshot.template, packets=[]),
+    )
+    up.submit(broken)  # mux_error -> emit lanza -> no se propaga
+
+
+def test_ignores_wrong_field_types(tmp_path: Path) -> None:
+    root = tmp_path / "pending"
+    root.mkdir()
+    (root / "a.json").write_text(
+        '{"key":"k","camera_id":"c","camera_name":"n","episode_ids":["e"],'
+        '"clip_start":"s","sha256":"h","duration_s":1.0,"created_at":"ayer"}'
+    )
+    (root / "a.mp4").write_bytes(b"x")
+    assert PendingQueue(root).oldest() is None
 
 
 def test_queue_full_evicts_oldest(tmp_path: Path) -> None:
