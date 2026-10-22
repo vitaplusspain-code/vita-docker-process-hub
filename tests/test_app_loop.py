@@ -21,6 +21,10 @@ def _fake_admin_context() -> AdminContext:
     )
 
 
+def _cfg():
+    return MagicMock(clips=MagicMock(enabled=False, cameras=[]), cameras=[])
+
+
 class _CountingService:
     def __init__(self, stop):
         self.calls = 0
@@ -35,7 +39,7 @@ class _CountingService:
 def test_rescan_loop_runs_until_stopped():
     stop = threading.Event()
     service = _CountingService(stop)
-    _rescan_loop(service, 0.01, stop)
+    _rescan_loop(service, _cfg(), 0.01, stop)
     assert service.calls == 1
 
 
@@ -44,7 +48,7 @@ def test_rescan_loop_exits_immediately_when_already_stopped():
     stop = threading.Event()
     stop.set()
     service = _CountingService(stop)
-    _rescan_loop(service, 3600.0, stop)
+    _rescan_loop(service, _cfg(), 3600.0, stop)
     assert service.calls == 0
 
 
@@ -107,6 +111,38 @@ def test_shutdown_stops_live_before_supervisor_and_sink():
     sink = MagicMock(close=lambda: order.append("sink"))
     _shutdown(None, live, supervisor, sink)
     assert order == ["live", "supervisor", "sink"]
+
+
+def test_shutdown_stops_clips_after_supervisor_and_before_sink():
+    # Los workers dejan de emitir antes de parar el tick del disparador, y el
+    # tick para antes de sink.close(): close() no puede competir con un tick
+    # que esté cerrando la misma ventana.
+    order: list[str] = []
+    supervisor = MagicMock(stop_all=lambda **_: order.append("supervisor"))
+    clips = MagicMock(stop=lambda **_: order.append("clips"))
+    sink = MagicMock(close=lambda: order.append("sink"))
+    _shutdown(None, None, supervisor, sink, clips)
+    assert order == ["supervisor", "clips", "sink"]
+
+
+def test_shutdown_closes_sink_even_if_clips_stop_fails():
+    sink = MagicMock()
+    clips = MagicMock()
+    clips.stop.side_effect = RuntimeError("boom")
+    try:
+        _shutdown(None, None, MagicMock(), sink, clips)
+    except RuntimeError:
+        pass
+    sink.close.assert_called_once()
+
+
+def test_rescan_loop_warns_missing_clip_cameras():
+    stop = threading.Event()
+    service = _CountingService(stop)
+    cfg = _cfg()
+    with patch("vitahub.app.warn_missing_clip_cameras") as warn:
+        _rescan_loop(service, cfg, 0.01, stop)
+    warn.assert_called_once_with(cfg)
 
 
 def test_shutdown_continues_even_if_live_stop_fails():

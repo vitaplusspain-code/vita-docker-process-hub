@@ -83,6 +83,10 @@ class ClipTriggerSink(EventSink):
         self._wall = wall
         self._lock = threading.Lock()
         self._windows: dict[str, _Window] = {}
+        # Tras close() un hilo de cámara rezagado aún puede emitir: el evento
+        # sigue llegando al sink interno, pero no abre ventanas que ya nadie
+        # cerraría (ni dispararía un clip con el sink interno ya cerrado).
+        self._closed = False
 
     def emit(self, event: Event) -> None:
         # Primero el sink interno: una excepción suya se propaga como siempre.
@@ -101,6 +105,8 @@ class ClipTriggerSink(EventSink):
             return
         now = self._monotonic()
         with self._lock:
+            if self._closed:
+                return
             win = self._windows.get(event.camera_id)
             if event.type == "fall_detected":
                 speed = _drop_speed(payload)
@@ -131,6 +137,8 @@ class ClipTriggerSink(EventSink):
     def tick(self) -> None:
         now = self._monotonic()
         with self._lock:
+            if self._closed:
+                return
             due = [w for w in self._windows.values() if w.deadline <= now]
             for w in due:
                 del self._windows[w.camera_id]
@@ -177,6 +185,7 @@ class ClipTriggerSink(EventSink):
 
     def close(self) -> None:
         with self._lock:
+            self._closed = True
             pending = list(self._windows.values())
             self._windows.clear()
         for w in pending:

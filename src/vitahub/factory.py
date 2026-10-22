@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import threading
+import time
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 
+from vitahub.clips.buffer import PacketBuffer
+from vitahub.clips.trigger import ClipTriggerSink
+from vitahub.clips.uploader import ClipUploader, PendingQueue, s3_put
 from vitahub.config import ConfigError, HubConfig, InferenceConfig
 from vitahub.identity.base import FaceEngine
 from vitahub.identity.face_id import FaceIdentifier
@@ -140,6 +146,124 @@ def build_live_service(cfg: HubConfig, sink: EventSink) -> LiveService | None:
         ),
         sink=sink,
     )
+
+
+@dataclass
+class ClipService:
+    """Las piezas de clips que `app.run` necesita ver: el sink decorado, los
+    buffers que llenan los grabadores de cada cámara y los dos hilos propios."""
+
+    sink: ClipTriggerSink
+    buffers: dict[str, PacketBuffer]
+    uploader: ClipUploader
+    _stop: threading.Event | None = field(default=None, init=False, repr=False)
+    _threads: list[threading.Thread] = field(default_factory=list, init=False, repr=False)
+
+    def start(self, stop: threading.Event) -> None:
+        self._stop = stop
+        self._threads = [
+            threading.Thread(
+                target=self._tick_loop, args=(stop,), name="clips-trigger", daemon=True
+            ),
+            threading.Thread(
+                target=self.uploader.run, args=(stop,), name="clips-upload", daemon=True
+            ),
+        ]
+        for t in self._threads:
+            t.start()
+
+    def _tick_loop(self, stop: threading.Event) -> None:
+        while not stop.wait(0.5):
+            try:
+                self.sink.tick()
+            except Exception:  # noqa: BLE001 — sin este hilo ninguna ventana se cerraría
+                _log.exception("fallo en el tick del disparador de clips")
+
+    def stop(self, timeout_s: float) -> None:
+        """Para y espera los dos hilos con un plazo global.
+
+        El tick debe haber terminado antes de `sink.close()`: si no, close() y
+        un tick tardío competirían por la misma ventana. La subida en curso
+        puede quedarse colgada en la red: por eso el plazo, y por eso el hilo
+        es daemon; el clip sigue en la cola y se sube en el siguiente arranque.
+        """
+        if self._stop is None:
+            return
+        self._stop.set()
+        deadline = time.monotonic() + timeout_s
+        for t in self._threads:
+            t.join(timeout=max(0.0, deadline - time.monotonic()))
+            if t.is_alive():
+                _log.warning("el hilo %s no terminó a tiempo en el apagado", t.name)
+
+
+def build_clip_service(
+    cfg: HubConfig, inner: EventSink, pending_dir: Path = Path("/data/clips-pending")
+) -> ClipService | None:
+    """Los clips de caída, o None si `clips.enabled` es false.
+
+    Como el directo, no conecta nada aquí: la primera llamada a AWS ocurre en
+    el hilo de subida, con reintento.
+    """
+    if not cfg.clips.enabled:
+        return None
+    clips = cfg.clips
+    # Mismo caso que en `build_live_service`: un PEM ilegible revienta aquí y
+    # se relanza como `ConfigError` con las rutas y la causa.
+    try:
+        fetch = https_fetcher(
+            clips.credentials_endpoint,
+            clips.role_alias,
+            cfg.hub_id,
+            Path(cfg.uplink.ca_path),
+            Path(cfg.uplink.cert_path),
+            Path(cfg.uplink.key_path),
+        )
+    except Exception as exc:  # se traduce a ConfigError abajo (con la causa encadenada)
+        raise ConfigError(
+            "clips.enabled es true pero no se pudo preparar la conexión al credentials "
+            f"provider ({exc}) — revisa que los certificados en {cfg.uplink.ca_path}, "
+            f"{cfg.uplink.cert_path} y {cfg.uplink.key_path} existan y sean PEM válidos"
+        ) from exc
+    creds = IotCredentialsProvider(fetch)
+    # El uploader emite por el sink interno, no por el disparador: sus eventos
+    # no son caídas y no tienen por qué pasar por él.
+    uploader = ClipUploader(
+        PendingQueue(pending_dir), cfg.hub_id, inner, s3_put(clips.bucket, clips.region, creds)
+    )
+    buffers = {camera_id: PacketBuffer() for camera_id in clips.cameras}
+    trigger = ClipTriggerSink(
+        inner, cfg.hub_id, set(clips.cameras), buffers.get, on_clip=uploader.submit
+    )
+    _log.info(
+        "clips de caída habilitados para %d cámaras (bucket %s)", len(buffers), clips.bucket
+    )
+    if cfg.inference.stream == "main":
+        # El recorder graba el mismo stream que analiza el hub: con el principal
+        # el buffer y cada clip pesan unas 8 veces más (spec §5.5).
+        _log.warning(
+            "clips habilitados con inference.stream: main — buffers de 22-45 MB por "
+            "cámara y clips de 12-25 MB; el substream basta para ver la caída"
+        )
+    return ClipService(sink=trigger, buffers=buffers, uploader=uploader)
+
+
+def warn_missing_clip_cameras(cfg: HubConfig) -> None:
+    """Avisa de cada cámara de `clips.cameras` que el hub no conoce.
+
+    Suele ser un id mal escrito en hub.yaml: esa cámara no grabaría nunca, y
+    el fallo no se notaría hasta la primera caída sin clip.
+    """
+    if not cfg.clips.enabled:
+        return
+    known = {camera.id for camera in cfg.cameras}
+    for camera_id in cfg.clips.cameras:
+        if camera_id not in known:
+            _log.warning(
+                "clips.cameras incluye %s, que no es ninguna cámara conocida — "
+                "revisa el id en hub.yaml",
+                camera_id,
+            )
 
 
 def _require_face_weights(root: str) -> None:

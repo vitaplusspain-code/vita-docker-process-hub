@@ -12,16 +12,20 @@ from vitahub.analytics.connection_monitor import ConnectionMonitor
 from vitahub.analytics.event_engine import EventEngine
 from vitahub.analytics.fall_engine import FallEngine
 from vitahub.analytics.tracker import Tracker
-from vitahub.config import ConfigError, load_config
+from vitahub.clips.recorder import record
+from vitahub.config import ConfigError, HubConfig, load_config
 from vitahub.control import AdminContext, admin_port, start_control_server
 from vitahub.discovery.onvif import discover
 from vitahub.factory import (
     _DEFAULT_FACES_DIR,
+    ClipService,
     build_admin_engine_factory,
+    build_clip_service,
     build_detector,
     build_face_identifier,
     build_live_service,
     build_sink,
+    warn_missing_clip_cameras,
 )
 from vitahub.ingest.rtsp import (
     backoff_delay,
@@ -51,6 +55,10 @@ _CAMERA_SHUTDOWN_DEADLINE_S = 20.0
 # El directo cierra sus peers con este plazo; sumado al de las cámaras debe
 # seguir con margen por debajo del stop_grace_period de Docker.
 _LIVE_SHUTDOWN_DEADLINE_S = 5.0
+# Los hilos de clips (tick del disparador y subida) se esperan con este plazo,
+# también en serie con los anteriores. Una subida colgada en la red no lo
+# alarga: el hilo es daemon y el clip sigue en la cola para el próximo arranque.
+_CLIPS_SHUTDOWN_DEADLINE_S = 5.0
 
 
 def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
@@ -88,9 +96,25 @@ def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
     tracker = Tracker() if fall_engine is not None else None
     monitor = ConnectionMonitor(cfg.hub_id)
     sink = build_sink(cfg)
+    # El disparador de clips envuelve el sink ANTES de que lo capturen el
+    # worker y el directo: todo evento pasa por él. Con clips apagados es None
+    # y el sink es el de siempre.
+    clips = build_clip_service(cfg, sink)
+    if clips is not None:
+        sink = clips.sink
+        clips.start(stop)
     identifier = build_face_identifier(cfg, env)
 
     def worker(camera: Camera, rtsp_url: str, cam_stop: threading.Event) -> None:
+        # El grabador comparte `cam_stop`: cuando el supervisor para o
+        # reinicia el worker (baja, cambio de URI), para también su grabador.
+        if clips is not None and camera.id in clips.buffers:
+            threading.Thread(
+                target=record,
+                args=(rtsp_url, clips.buffers[camera.id], cam_stop),
+                name=f"clip-{camera.id}",
+                daemon=True,
+            ).start()
         _camera_loop(  # type: ignore[no-untyped-call]
             camera,
             rtsp_url,
@@ -112,6 +136,7 @@ def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
     result = service.run_once()
     if result.status == "ok" and result.found == 0:
         _log.warning("descubrimiento: 0 cámaras encontradas — revisa ONVIF/credencial/red")
+    warn_missing_clip_cameras(cfg)
 
     admin_ctx = AdminContext(
         faces_dir=Path(env.get("VITAHUB_FACES_DIR", _DEFAULT_FACES_DIR)),
@@ -136,7 +161,7 @@ def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
     # `unhealthy` pese a estar sano (el HEALTHCHECK señala, no remedia).
     threading.Thread(
         target=_rescan_loop,
-        args=(service, cfg.discovery.interval_seconds, stop),
+        args=(service, cfg, cfg.discovery.interval_seconds, stop),
         name="rescan",
         daemon=True,
     ).start()
@@ -151,7 +176,7 @@ def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
             _touch_heartbeat()
     finally:
         _log.info("apagando (SIGTERM)")
-        _shutdown(httpd, live, supervisor, sink)
+        _shutdown(httpd, live, supervisor, sink, clips)
 
 
 def _shutdown(
@@ -159,6 +184,7 @@ def _shutdown(
     live: LiveService | None,
     supervisor: CameraSupervisor,
     sink: EventSink,
+    clips: ClipService | None = None,
 ) -> None:
     """Cierra en orden y con cada paso garantizado pase lo que pase con el anterior.
 
@@ -168,8 +194,12 @@ def _shutdown(
     nadie señalará. Luego el directo, que avisa a sus viewers con
     `closed:shutdown` y emite sus `live_view_ended` por el sink — por eso va
     antes de cerrarlo. Luego los workers, con un plazo global acotado (no por
-    cámara, ver `_CAMERA_SHUTDOWN_DEADLINE_S`). El sink se cierra siempre,
-    incluso si algo de lo anterior falla.
+    cámara, ver `_CAMERA_SHUTDOWN_DEADLINE_S`). Luego los hilos de clips: con
+    los workers ya parados no llegan caídas nuevas, y el tick tiene que haber
+    terminado antes de `sink.close()` — que es el del disparador de clips y
+    cierra sus ventanas abiertas con `fall_clip_failed` "shutdown" — para no
+    competir con él por la misma ventana. El sink se cierra siempre, incluso
+    si algo de lo anterior falla.
     """
     try:
         if httpd is not None:
@@ -183,7 +213,11 @@ def _shutdown(
             try:
                 supervisor.stop_all(deadline_s=_CAMERA_SHUTDOWN_DEADLINE_S)
             finally:
-                sink.close()
+                try:
+                    if clips is not None:
+                        clips.stop(timeout_s=_CLIPS_SHUTDOWN_DEADLINE_S)
+                finally:
+                    sink.close()
 
 
 def _start_control_server_safe(
@@ -207,10 +241,14 @@ def _start_control_server_safe(
         return None
 
 
-def _rescan_loop(service: RescanService, interval_seconds: float, stop: threading.Event) -> None:
+def _rescan_loop(
+    service: RescanService, cfg: HubConfig, interval_seconds: float, stop: threading.Event
+) -> None:
     """Espera sobre el event de parada (no duerme): el apagado es inmediato."""
     while not stop.wait(timeout=interval_seconds):
         service.run_once()
+        # Una cámara de clips.cameras puede aparecer o desaparecer en cada rescan.
+        warn_missing_clip_cameras(cfg)
 
 
 def _emit_all(sink: EventSink, events: list[Event]) -> None:

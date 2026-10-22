@@ -1,8 +1,12 @@
+import logging
 import ssl
+import threading
+from pathlib import Path
 
 import pytest
 
 from vitahub.config import (
+    ClipsConfig,
     ConfigError,
     Credentials,
     DiscoveryConfig,
@@ -13,14 +17,18 @@ from vitahub.config import (
     UplinkConfig,
 )
 from vitahub.factory import (
+    ClipService,
+    build_clip_service,
     build_detector,
     build_face_identifier,
     build_live_service,
     build_sink,
+    warn_missing_clip_cameras,
 )
 from vitahub.inference.person_pose_yolo import PosePersonDetector
 from vitahub.inference.person_yolo import PersonDetector
 from vitahub.inference.stub import StubDetector
+from vitahub.models import Camera
 from vitahub.sinks.aws_iot import AwsIotSink
 from vitahub.sinks.fanout import FanoutSink
 from vitahub.sinks.stdout_json import StdoutJsonSink
@@ -234,3 +242,84 @@ def test_build_live_service_wraps_unreadable_pem_as_config_error(tmp_path):
     with pytest.raises(ConfigError, match="bad.pem") as info:
         build_live_service(cfg, StdoutJsonSink())
     assert info.value.__cause__ is not None
+
+
+def test_build_clip_service_none_when_disabled(tmp_path):
+    # `_hub_config` trae un ClipsConfig por defecto (apagado): ni cola ni hilos.
+    assert build_clip_service(_hub_config(), StdoutJsonSink(), tmp_path / "q") is None
+    assert not (tmp_path / "q").exists()
+
+
+def test_build_clip_service_bad_pem_is_config_error(tmp_path):
+    # Mismo caso que el del directo: los clips sacan sus credenciales con el
+    # certificado del uplink, y un PEM ilegible debe decir qué revisar.
+    bad = tmp_path / "bad.pem"
+    bad.write_text("esto no es un PEM")
+    cfg = _hub_config(
+        UplinkConfig(
+            enabled=True,
+            endpoint="abc-ats.iot.eu-west-1.amazonaws.com",
+            ca_path=str(bad),
+            cert_path=str(bad),
+            key_path=str(bad),
+        )
+    )
+    cfg.clips = ClipsConfig(
+        enabled=True,
+        cameras=["cam1"],
+        bucket="vita-dev-clips",
+        role_alias="hub-clips",
+        credentials_endpoint="c.credentials.iot.eu-west-1.amazonaws.com",
+    )
+    with pytest.raises(ConfigError, match="bad.pem") as info:
+        build_clip_service(cfg, StdoutJsonSink(), tmp_path / "q")
+    assert info.value.__cause__ is not None
+
+
+def test_warn_missing_clip_cameras_logs(caplog):
+    cfg = _hub_config()
+    cfg.cameras = [Camera(id="cam1", name="Salón", last_ip="10.0.0.2")]
+    cfg.clips = ClipsConfig(enabled=True, cameras=["cam1", "cam-baño"])
+    with caplog.at_level(logging.WARNING, logger="factory"):
+        warn_missing_clip_cameras(cfg)
+    messages = [r.getMessage() for r in caplog.records]
+    assert len(messages) == 1
+    assert "cam-baño" in messages[0]
+
+
+def test_compose_passes_clip_env():
+    # El entorno del servicio se lista explícito: una variable que falte aquí se
+    # queda en el .env y load_config falla al arrancar (como en 51a52c6).
+    # docker-compose.mac.yml es un override que se fusiona sobre este fichero
+    # (`-f docker-compose.yml -f docker-compose.mac.yml`) y hereda su entorno.
+    text = (Path(__file__).resolve().parent.parent / "docker-compose.yml").read_text()
+    assert "VITAHUB_CLIPS_BUCKET: ${VITAHUB_CLIPS_BUCKET:-}" in text
+    assert "VITAHUB_CLIPS_ROLE_ALIAS: ${VITAHUB_CLIPS_ROLE_ALIAS:-}" in text
+
+
+def test_clip_service_start_and_stop_joins_threads():
+    ticks = threading.Event()
+
+    class _Trigger:
+        def tick(self):
+            ticks.set()
+
+    class _Uploader:
+        def run(self, stop):
+            stop.wait()
+
+    svc = ClipService(sink=_Trigger(), buffers={}, uploader=_Uploader())  # type: ignore[arg-type]
+    stop = threading.Event()
+    svc.start(stop)
+    names = {t.name for t in threading.enumerate()}
+    assert {"clips-trigger", "clips-upload"} <= names
+    assert ticks.wait(2.0)
+    svc.stop(timeout_s=2.0)
+    assert stop.is_set()
+    names = {t.name for t in threading.enumerate()}
+    assert not {"clips-trigger", "clips-upload"} & names
+
+
+def test_clip_service_stop_without_start_is_harmless():
+    svc = ClipService(sink=object(), buffers={}, uploader=object())  # type: ignore[arg-type]
+    svc.stop(timeout_s=0.1)

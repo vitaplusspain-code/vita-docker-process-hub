@@ -5,10 +5,11 @@ services:
     restart: unless-stopped
     network_mode: host          # necesario para el multicast ONVIF de descubrimiento
     # Margen por encima del peor caso de apagado antes de que Docker mande
-    # SIGKILL: 20s de cámaras + 5s del directo (_CAMERA_SHUTDOWN_DEADLINE_S y
-    # _LIVE_SHUTDOWN_DEADLINE_S en app.py, se suman porque van en serie) más
-    # el cierre del control HTTP y del sink. Con 30s sobraban solo 5s; 45s
-    # dejan 20s. El valor por defecto de Docker (10s) se queda corto.
+    # SIGKILL: 20s de cámaras + 5s del directo + 5s de los hilos de clips
+    # (_CAMERA_SHUTDOWN_DEADLINE_S, _LIVE_SHUTDOWN_DEADLINE_S y
+    # _CLIPS_SHUTDOWN_DEADLINE_S en app.py, se suman porque van en serie) más
+    # el cierre del control HTTP y del sink. 45s dejan 15s de margen. El valor
+    # por defecto de Docker (10s) se queda corto.
     stop_grace_period: 45s
     # Tope de logs: el driver json-file por defecto NO limita el tamaño del
     # stdout de eventos, y este aparato está pensado para correr años
@@ -40,5 +41,9 @@ services:
       VITAHUB_IOT_CREDENTIALS_ENDPOINT: ${VITAHUB_IOT_CREDENTIALS_ENDPOINT:-}
       VITAHUB_LIVE_ROLE_ALIAS: ${VITAHUB_LIVE_ROLE_ALIAS:-}
       VITAHUB_LIVE_CHANNEL_PREFIX: ${VITAHUB_LIVE_CHANNEL_PREFIX:-}
+      # Vacías por defecto: solo son obligatorias con clips.enabled: true, y de
+      # eso ya se queja load_config con un mensaje que dice qué falta.
+      VITAHUB_CLIPS_BUCKET: ${VITAHUB_CLIPS_BUCKET:-}
+      VITAHUB_CLIPS_ROLE_ALIAS: ${VITAHUB_CLIPS_ROLE_ALIAS:-}
     volumes:
       - ./data:/data

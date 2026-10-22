@@ -256,3 +256,14 @@ def test_close_emits_shutdown_then_closes_inner() -> None:
     assert ev.payload["reason"] == "shutdown"
     assert ev.payload["episode_ids"] == ["e1"]
     assert r.inner.closed
+
+
+def test_after_close_forwards_but_does_not_track() -> None:
+    # Un hilo de cámara rezagado puede emitir después del cierre: el evento
+    # llega al sink interno, pero no abre una ventana que ya nadie cerraría.
+    rig = _Rig()
+    rig.sink.close()
+    rig.fall(100.0)
+    rig.tick(200.0)
+    assert [e.type for e in rig.inner.events] == ["fall_detected"]
+    assert rig.clips == []
