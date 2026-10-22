@@ -537,3 +537,85 @@ def test_live_rejects_colon_in_hub_id(tmp_path):
 def test_live_section_must_be_mapping(tmp_path):
     with pytest.raises(ConfigError, match="live"):
         load_config(_write(tmp_path, VALID_YAML + "live: [1]\n"), ENV)
+
+
+_CLIPS_YAML = """hub_id: hub-3f9a
+inference:
+  detector: person_pose
+  fall:
+    enabled: true
+"""
+
+
+def _clips_yaml(
+    block: str = "clips:\n  enabled: true\n  cameras: [onvif-abc]\n",
+    uplink: bool = True,
+    fall: bool = True,
+) -> str:
+    text = _CLIPS_YAML if fall else _CLIPS_YAML.replace("enabled: true", "enabled: false")
+    return text + ("uplink:\n  enabled: true\n" if uplink else "") + block
+
+
+def _clips_env(tmp_path: Path) -> dict[str, str]:
+    env = _certs(tmp_path)
+    env["VITAHUB_IOT_CREDENTIALS_ENDPOINT"] = "abc.credentials.iot.eu-west-1.amazonaws.com"
+    env["VITAHUB_CLIPS_BUCKET"] = "vita-dev-clips"
+    env["VITAHUB_CLIPS_ROLE_ALIAS"] = "vita-dev-hub-clips"
+    return env
+
+
+def test_clips_defaults_disabled(tmp_path):
+    cfg = load_config(_write(tmp_path, VALID_YAML), ENV)
+    assert cfg.clips.enabled is False
+    assert cfg.clips.cameras == []
+    assert cfg.clips.region == "eu-west-1"
+
+
+def test_clips_valid(tmp_path):
+    cfg = load_config(_write(tmp_path, _clips_yaml()), _clips_env(tmp_path))
+    assert cfg.clips.enabled is True
+    assert cfg.clips.cameras == ["onvif-abc"]
+    assert cfg.clips.region == "eu-west-1"
+    assert cfg.clips.bucket == "vita-dev-clips"
+    assert cfg.clips.role_alias == "vita-dev-hub-clips"
+    assert cfg.clips.credentials_endpoint == "abc.credentials.iot.eu-west-1.amazonaws.com"
+
+
+def test_clips_requires_uplink(tmp_path):
+    with pytest.raises(ConfigError, match="uplink"):
+        load_config(_write(tmp_path, _clips_yaml(uplink=False)), _clips_env(tmp_path))
+
+
+def test_clips_requires_fall(tmp_path):
+    with pytest.raises(ConfigError, match="inference.fall"):
+        load_config(_write(tmp_path, _clips_yaml(fall=False)), _clips_env(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "cameras", ["[]", "onvif-abc", "[1]", "['']", "[onvif-abc, '']"],
+)
+def test_clips_requires_cameras(tmp_path, cameras):
+    block = f"clips:\n  enabled: true\n  cameras: {cameras}\n"
+    with pytest.raises(ConfigError, match="clips.cameras"):
+        load_config(_write(tmp_path, _clips_yaml(block)), _clips_env(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "var",
+    ["VITAHUB_CLIPS_BUCKET", "VITAHUB_CLIPS_ROLE_ALIAS", "VITAHUB_IOT_CREDENTIALS_ENDPOINT"],
+)
+def test_clips_requires_env(tmp_path, var):
+    env = _clips_env(tmp_path)
+    del env[var]
+    with pytest.raises(ConfigError, match=var):
+        load_config(_write(tmp_path, _clips_yaml()), env)
+
+
+def test_clips_section_must_be_mapping(tmp_path):
+    with pytest.raises(ConfigError, match="clips"):
+        load_config(_write(tmp_path, VALID_YAML + "clips: [1]\n"), ENV)
+
+
+def test_clips_disabled_still_validates_region(tmp_path):
+    with pytest.raises(ConfigError, match="clips.region"):
+        load_config(_write(tmp_path, VALID_YAML + "clips:\n  region: ''\n"), ENV)

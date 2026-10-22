@@ -94,6 +94,17 @@ class LiveConfig:
 
 
 @dataclass
+class ClipsConfig:
+    enabled: bool = False
+    # Opt-in por cámara: solo estas se graban (la del baño, por ejemplo, no).
+    cameras: list[str] = field(default_factory=list)
+    region: str = "eu-west-1"
+    bucket: str = ""
+    role_alias: str = ""
+    credentials_endpoint: str = ""
+
+
+@dataclass
 class HubConfig:
     hub_id: str
     discovery: DiscoveryConfig
@@ -102,6 +113,7 @@ class HubConfig:
     credentials: Credentials
     uplink: UplinkConfig = field(default_factory=UplinkConfig)
     live: LiveConfig = field(default_factory=LiveConfig)
+    clips: ClipsConfig = field(default_factory=ClipsConfig)
 
 
 def _credentials_from_env(env: Mapping[str, str]) -> Credentials:
@@ -285,6 +297,74 @@ def _live_from_raw(
     )
 
 
+def _clips_from_raw(
+    raw: object, env: Mapping[str, str], uplink: UplinkConfig, fall: FallConfig
+) -> ClipsConfig:
+    """Lee la sección `clips`. Mismo criterio fail-fast que `_live_from_raw`.
+
+    El técnico activa los clips después de registrar el consentimiento en el
+    panel: un hogar con `enabled: true` que no graba (sin uplink, sin cámaras,
+    sin bucket) fallaría en silencio justo cuando haría falta el vídeo.
+    """
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ConfigError("Sección 'clips' debe ser un mapping YAML")
+    enabled = bool(raw.get("enabled", False))
+    region = raw.get("region", "eu-west-1")
+    if not isinstance(region, str) or not region:
+        raise ConfigError("Campo 'clips.region' debe ser una cadena no vacía")
+    cameras_raw = raw.get("cameras")
+    if cameras_raw is None:
+        cameras_raw = []
+    if not isinstance(cameras_raw, list) or not all(
+        isinstance(c, str) and c for c in cameras_raw
+    ):
+        raise ConfigError("Campo 'clips.cameras' debe ser una lista de ids de cámara (cadenas no vacías)")
+    cameras = list(cameras_raw)
+    if not enabled:
+        return ClipsConfig(enabled=False, cameras=cameras, region=region)
+
+    if not uplink.enabled:
+        raise ConfigError(
+            "clips.enabled requiere 'uplink.enabled: true': los clips obtienen sus "
+            "credenciales AWS con el certificado del uplink"
+        )
+    if not fall.enabled:
+        raise ConfigError(
+            "clips.enabled requiere 'inference.fall.enabled: true': el clip se graba "
+            "a raíz de una caída detectada"
+        )
+    if not cameras:
+        raise ConfigError(
+            "clips.enabled es true pero 'clips.cameras' está vacío — lista los ids de "
+            "las cámaras con consentimiento (opt-in por cámara)"
+        )
+
+    env_values: dict[str, str] = {}
+    for var in (
+        "VITAHUB_IOT_CREDENTIALS_ENDPOINT",
+        "VITAHUB_CLIPS_BUCKET",
+        "VITAHUB_CLIPS_ROLE_ALIAS",
+    ):
+        value = env.get(var, "")
+        if not value:
+            raise ConfigError(
+                f"clips.enabled es true pero falta la variable de entorno {var} "
+                "(la imprime scripts/provision-hub.sh del repo de arquitectura)"
+            )
+        env_values[var] = value
+
+    return ClipsConfig(
+        enabled=True,
+        cameras=cameras,
+        region=region,
+        bucket=env_values["VITAHUB_CLIPS_BUCKET"],
+        role_alias=env_values["VITAHUB_CLIPS_ROLE_ALIAS"],
+        credentials_endpoint=env_values["VITAHUB_IOT_CREDENTIALS_ENDPOINT"],
+    )
+
+
 def _fall_from_raw(raw: object, detector: str) -> FallConfig:
     if raw is None:
         raw = {}
@@ -416,6 +496,7 @@ def load_config(path: Path, env: Mapping[str, str]) -> HubConfig:
         credentials=credentials,
         uplink=uplink,
         live=_live_from_raw(raw.get("live"), env, uplink, hub_id),
+        clips=_clips_from_raw(raw.get("clips"), env, uplink, fall),
     )
 
 

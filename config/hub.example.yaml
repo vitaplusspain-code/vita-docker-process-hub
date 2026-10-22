@@ -28,6 +28,17 @@ live:
 # Con enabled: true hacen falta además estas variables de entorno:
 #   VITAHUB_IOT_CREDENTIALS_ENDPOINT, VITAHUB_LIVE_ROLE_ALIAS, VITAHUB_LIVE_CHANNEL_PREFIX
 #   (las imprime provision-hub.sh del repo de arquitectura)
+clips:
+  enabled: false            # true para subir a S3 un clip de vídeo ante una caída con riesgo
+                            # (requiere uplink.enabled e inference.fall.enabled). Actívalo solo
+                            # DESPUÉS de registrar el consentimiento de clips en el panel del técnico
+  cameras: []               # ids de cámara con clips; opt-in por cámara: deja fuera, por ejemplo,
+                            # la cámara del baño
+  region: eu-west-1
+# Con enabled: true hacen falta además estas variables de entorno:
+#   VITAHUB_CLIPS_BUCKET, VITAHUB_CLIPS_ROLE_ALIAS
+#   (las imprime provision-hub.sh del repo de arquitectura)
+#   y VITAHUB_IOT_CREDENTIALS_ENDPOINT, la misma que usa el directo
 cameras: []                 # se autopobla al descubrir; editable a mano
 # Nota: tras el primer descubrimiento el hub reescribe este fichero (sección cameras);
 # los comentarios pueden perderse. Edita a mano solo con el hub parado.
