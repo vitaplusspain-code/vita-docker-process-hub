@@ -8,11 +8,16 @@ from collections.abc import Callable
 import av
 
 from vitahub.clips.buffer import BufferedPacket, PacketBuffer
-from vitahub.ingest.rtsp import backoff_delay, next_attempt
+from vitahub.ingest.rtsp import backoff_delay, next_attempt, strip_credentials
 from vitahub.live.source import _RTSP_OPTIONS
 from vitahub.logging_setup import get_logger
 
 _log = get_logger("clips.recorder")
+
+
+def _safe_error(exc: BaseException, uri: str) -> str:
+    """Error sin credenciales: PyAV mete la URI completa en el mensaje."""
+    return f"{type(exc).__name__}: {str(exc).replace(uri, strip_credentials(uri))}"
 
 
 def record(
@@ -26,7 +31,9 @@ def record(
     """Demuxa la cámara al buffer hasta `stop`, reconectando con backoff.
 
     Corre en su propio hilo durante toda la vida del worker de la cámara, así
-    que nunca deja escapar una excepción. No se loguea `uri`: lleva credenciales.
+    que nunca deja escapar una excepción. Los errores se loguean sin traceback y
+    con `uri` sin credenciales: PyAV la incluye en el mensaje y el formateador
+    no redacta la excepción formateada.
     `format` y `options` existen para probarlo con un fichero local.
     """
     attempt = 0
@@ -47,13 +54,13 @@ def record(
                     buffer.append(BufferedPacket(monotonic(), packet.is_keyframe, packet))
                     attempt = 0  # conectó y entrega vídeo: el siguiente fallo parte de cero
             _log.warning("fin del stream de la cámara; se reintenta")
-        except Exception:  # noqa: BLE001 — el hilo grabador no puede morir por un fallo de red o de códec
-            _log.exception("fallo grabando la cámara; se reintenta")
+        except Exception as exc:  # noqa: BLE001 — el hilo grabador no puede morir por un fallo de red o de códec
+            _log.warning("fallo grabando la cámara; se reintenta: %s", _safe_error(exc, uri))
         finally:
             if container is not None:
                 try:
                     container.close()
-                except Exception:  # noqa: BLE001 — cerrar un contenedor roto no debe romper el bucle
-                    _log.exception("no se pudo cerrar el contenedor de la cámara")
+                except Exception as exc:  # noqa: BLE001 — cerrar un contenedor roto no debe romper el bucle
+                    _log.warning("no se pudo cerrar el contenedor de la cámara: %s", _safe_error(exc, uri))
         stop.wait(backoff_delay(attempt))
         attempt = next_attempt(attempt)
