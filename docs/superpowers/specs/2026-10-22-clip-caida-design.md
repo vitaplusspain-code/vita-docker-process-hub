@@ -354,7 +354,7 @@ Siguiendo `bloque-hub-live.sh` y los helpers de `_comun.sh`:
 - Rol `${p}-hub-clips`, de confianza `credentials.iot.amazonaws.com`, con una sola sentencia:
   `s3:PutObject` sobre `arn:aws:s3:::<bucket>/${credentials-iot:ThingName}/*`. Publica el ARN en
   `/vita/<env>/hub-clips/hub-role-arn`.
-- Inline `app-web-fall-clips` en el rol de la Lambda de la app: `s3:GetObject` sobre
+- Inline `${p}-app-web-fall-clips` (p. ej. `vita-dev-app-web-fall-clips`, el patrón del repo) en el rol de la Lambda de la app: `s3:GetObject` sobre
   `arn:aws:s3:::<bucket>/*`.
 - El rol del hub lleva la condición `"Condition": {"StringEquals": {"s3:if-none-match": "*"}}`
   en su `s3:PutObject` (§3.1).
@@ -554,7 +554,11 @@ Un plan por repo, todos contra este spec:
 2. **Hub** (plan existente) y **motor de reglas**, en paralelo. El motor puede ir antes que el
    hub: sin eventos `fall_clip_*` no hace nada.
 3. **API**, después **frontend**.
-4. Prueba e2e manual contra la cuenta real: caída simulada → objeto en S3 → `detail.clip` en la
+4. **Antes de la e2e,** un `PutObject` real con el certificado de un hogar: con una clave nueva
+   debe dar 200, y repetido sobre la misma clave 412. Toda la subida depende de que S3 aplique
+   `s3:if-none-match` en la policy. Si no lo hiciera, el hub recibiría un deny sin que aparezca
+   ningún error en AWS.
+5. Prueba e2e manual contra la cuenta real: caída simulada → objeto en S3 → `detail.clip` en la
    alerta → "Ver vídeo" en la app con una cuenta con permiso → fila `fall_clip_viewed`; misma
    prueba con una cuenta sin permiso (no ve el botón) y tras retirar el consentimiento.
 
