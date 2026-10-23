@@ -170,8 +170,15 @@ Además de los eventos de presencia, el hub emite **eventos de conexión**:
 - `camera_unreachable` (severidad `medium`) — la cámara lleva 5 minutos sin entregar un fotograma
   válido (abrir el socket no cuenta: solo el fotograma es evidencia de que hay vídeo de verdad). El
   payload trae `last_ip` y `minutes_down`. Se emite **una vez** por episodio de desconexión.
-- `camera_reachable` (severidad `info`) — vuelve a llegar vídeo, y solo si antes se avisó de la
-  desconexión.
+- `camera_reachable` (severidad `info`) — llega un fotograma válido. El payload trae `last_ip` y un
+  campo `initial`:
+  - `initial: true` en el **primer fotograma de cada cámara desde que arrancó el proceso**. Motivo:
+    si la cámara vuelve mientras el hub se está reiniciando, nunca llegaría un `camera_reachable` y
+    la nube la daría por caída para siempre.
+  - `initial: false` en la **vuelta tras un `camera_unreachable` previo** (recuperación de una caída
+    avisada). Si la caída avisada ocurre antes del primer fotograma, manda este caso: la vuelta es
+    recuperación, no primera vez.
+  - Un fotograma posterior sin caída previa no emite nada.
 
 El umbral es holgado a propósito: un tirón de cable tarda ~30 s solo en que el watchdog de FFmpeg lo
 detecte, más el backoff. Por debajo de eso saldrían avisos falsos cada vez que alguien desenchufa
