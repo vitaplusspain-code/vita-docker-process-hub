@@ -15,6 +15,10 @@ def _utcnow() -> datetime:
 class _ConnState:
     last_ok: float
     reported_down: bool = False
+    # True en cuanto se emite el primer camera_reachable para esta cámara en
+    # este proceso (sea el `initial: true` del primer fotograma o un
+    # `initial: false` de recuperación de una caída previa al primer fotograma).
+    emitted_initial: bool = False
 
 
 class ConnectionMonitor:
@@ -47,14 +51,44 @@ class ConnectionMonitor:
         cámara puede abrir la conexión sin llegar a entregar vídeo (slot de
         stream agotado, RTP filtrado, firmware colgado), y ahí el `open` por
         sí solo no demuestra nada.
+
+        Emite `camera_reachable` en dos casos:
+        - En el primer fotograma de cada cámara desde que arrancó el proceso,
+          con `initial: true`. Motivo (spec §7 de 2026-10-23-estado-conexion-camara):
+          si la cámara vuelve mientras el hub se reinicia, nunca llegaría un
+          `camera_reachable` y la nube la daría por caída para siempre.
+        - En la vuelta tras una caída avisada por `camera_unreachable`, con
+          `initial: false` (recuperación). Si la caída avisada ocurre antes del
+          primer fotograma, manda este caso: la vuelta es recuperación, no
+          primera vez.
+
+        Un fotograma posterior sin caída previa no emite nada.
         """
         state = self._states.setdefault(camera.id, _ConnState(last_ok=now))
         was_down = state.reported_down
+        emitted_initial = state.emitted_initial
         state.last_ok = now
         state.reported_down = False
-        if not was_down:
-            return []
-        return [self._event(camera, "camera_reachable", "info", {"last_ip": camera.last_ip})]
+        state.emitted_initial = True
+        if was_down:
+            return [
+                self._event(
+                    camera,
+                    "camera_reachable",
+                    "info",
+                    {"last_ip": camera.last_ip, "initial": False},
+                )
+            ]
+        if not emitted_initial:
+            return [
+                self._event(
+                    camera,
+                    "camera_reachable",
+                    "info",
+                    {"last_ip": camera.last_ip, "initial": True},
+                )
+            ]
+        return []
 
     def on_failed(self, camera: Camera, now: float) -> list[Event]:
         # El reloj arranca en el primer fallo, que ocurre a los pocos segundos

@@ -44,17 +44,18 @@ def test_unreachable_is_not_repeated_while_still_down():
     assert m.on_failed(cam, 900.0) == []
 
 
-def test_reachable_only_after_an_unreachable():
+def test_recovery_from_outage_mid_stream_is_initial_false():
+    """Tras una caída avisada y con fotogramas previos, la vuelta lleva initial: False."""
     m = _monitor()
     cam = _cam()
-    m.on_failed(cam, 0.0)
-    assert m.on_frame(cam, 10.0) == []             # nunca se reportó caída
+    m.on_frame(cam, 0.0)                            # primer fotograma: ya marcó emitted_initial
     m.on_failed(cam, 20.0)
-    m.on_failed(cam, 400.0)                        # aquí sí se reporta
+    m.on_failed(cam, 400.0)                         # aquí se reporta camera_unreachable
     events = m.on_frame(cam, 500.0)
     assert len(events) == 1
     assert events[0].type == "camera_reachable"
     assert events[0].severity == "info"
+    assert events[0].payload == {"last_ip": "10.0.0.5", "initial": False}
 
 
 def test_a_new_outage_emits_again():
@@ -133,3 +134,74 @@ def test_camera_that_opens_repeatedly_without_frames_still_reports():
     assert m.on_failed(cam, 200.0) == []  # aún por debajo del umbral
     events = m.on_failed(cam, 301.0)
     assert [e.type for e in events] == ["camera_unreachable"]
+
+
+def test_initial_true_on_first_frame():
+    """Primer fotograma de la cámara en el proceso: camera_reachable con initial: True.
+
+    Motivo (spec §7): si la cámara vuelve mientras el hub está reiniciado,
+    nunca llegaría un camera_reachable y la nube la daría por caída para
+    siempre.
+    """
+    m = _monitor()
+    cam = _cam()
+    events = m.on_frame(cam, 0.0)
+    assert len(events) == 1
+    assert events[0].type == "camera_reachable"
+    assert events[0].severity == "info"
+    assert events[0].payload == {"last_ip": "10.0.0.5", "initial": True}
+
+
+def test_second_frame_without_prior_outage_is_quiet():
+    """Tras el primer fotograma, otro fotograma sin caída intermedia no emite nada."""
+    m = _monitor()
+    cam = _cam()
+    m.on_frame(cam, 0.0)                            # emite initial: True
+    assert m.on_frame(cam, 10.0) == []
+    assert m.on_frame(cam, 100.0) == []
+
+
+def test_initial_true_after_brief_failure_below_threshold():
+    """Fallo inicial corto (sin camera_unreachable), luego primer fotograma: initial: True.
+
+    Sin aviso de caída, el fotograma sigue siendo el primero del proceso.
+    """
+    m = _monitor()
+    cam = _cam()
+    m.on_failed(cam, 0.0)
+    assert m.on_failed(cam, 100.0) == []            # aún por debajo del umbral
+    events = m.on_frame(cam, 150.0)
+    assert len(events) == 1
+    assert events[0].type == "camera_reachable"
+    assert events[0].payload == {"last_ip": "10.0.0.5", "initial": True}
+
+
+def test_recovery_after_announced_outage_is_initial_false():
+    """Cámara que arranca caída, se emite camera_unreachable, luego primer fotograma.
+
+    Review Focus 1: aunque sea literalmente el primer fotograma de la cámara,
+    la caída avisada manda y la vuelta lleva initial: False (recuperación).
+    """
+    m = _monitor()
+    cam = _cam()
+    m.on_failed(cam, 0.0)
+    unreachable = m.on_failed(cam, 301.0)
+    assert [e.type for e in unreachable] == ["camera_unreachable"]
+    events = m.on_frame(cam, 500.0)
+    assert len(events) == 1
+    assert events[0].type == "camera_reachable"
+    assert events[0].payload == {"last_ip": "10.0.0.5", "initial": False}
+    # Y el siguiente fotograma ya no emite nada: emitted_initial queda a True.
+    assert m.on_frame(cam, 600.0) == []
+
+
+def test_initial_fires_once_per_camera():
+    """Review Focus 3: cada cámara emite su propio initial: True; no interfieren."""
+    m = _monitor()
+    a, b = _cam("onvif-a"), _cam("onvif-b")
+    events_a = m.on_frame(a, 0.0)
+    assert [(e.camera_id, e.payload["initial"]) for e in events_a] == [("onvif-a", True)]
+    events_b = m.on_frame(b, 0.0)
+    assert [(e.camera_id, e.payload["initial"]) for e in events_b] == [("onvif-b", True)]
+    assert m.on_frame(a, 10.0) == []
+    assert m.on_frame(b, 10.0) == []
