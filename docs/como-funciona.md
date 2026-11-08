@@ -87,6 +87,10 @@ Dos ideas de diseño que conviene retener:
 | `identity/insightface_engine.py` | `InsightFaceEngine`: envoltorio de InsightFace (SCRFD + ArcFace) sobre los pesos embebidos. |
 | `identity/gallery.py` | `load_gallery`: fotos de `/data/faces/<person_id>/` → embedding medio por persona (en memoria). |
 | `identity/face_id.py` | `FaceIdentifier`: busca caras en pistas anónimas y etiqueta con regla de 2 coincidencias sobre `match_threshold`. |
+| `gallery/service.py` | `CloudGalleryService`: se suscribe al shadow `face-gallery`, espera el debounce, aplica el manifiesto y publica `reported`; pide el reinicio si cambió el disco. |
+| `gallery/apply.py` | Aplica el manifiesto a `/data/faces` con sustitución por carpeta `person_key`; descarga y valida todo antes de tocar el disco. |
+| `gallery/manifest.py`, `gallery/shadow.py` | Parseo del `manifest.json` y de los mensajes del shadow, y construcción de `reported`. Puras. |
+| `gallery/s3.py` | `ListObjectsV2` paginado y `GetObject` con las credenciales del role alias (solo lectura). |
 | `sinks/` | `EventSink` (interfaz), `StdoutJsonSink`, `FanoutSink` (aísla fallos entre sinks) y `AwsIotSink` (MQTT/TLS a AWS IoT Core). |
 | `live/token.py` | Carga de claves públicas y verificación del JWT de sesión. Pura. |
 | `live/protocol.py` | Parseo y serialización de mensajes del DataChannel. Pura. |
@@ -105,7 +109,7 @@ Dos ideas de diseño que conviene retener:
 | `clips/assembler.py` | Remux de los paquetes a un MP4 (sin recodificar) y su sha256. |
 | `clips/uploader.py` | `PendingQueue` (cola en disco) y `ClipUploader`: sube a S3 con reintentos y emite `fall_clip_ready`/`fall_clip_failed`. |
 | `clips/events.py` | Construcción de los eventos `fall_clip_*`. |
-| `factory.py` | Construye el `Detector` según la config (`stub` / `person_yolo` / `person_pose`), el `EventSink` según `uplink.enabled`, el `FaceIdentifier` (`build_face_identifier`) según `inference.identity.enabled` y el `LiveService` (`build_live_service`) según `live.enabled` y el `ClipService` (`build_clip_service`) según `clips.enabled`. |
+| `factory.py` | Construye el `Detector` según la config (`stub` / `person_yolo` / `person_pose`), el `EventSink` según `uplink.enabled`, el `FaceIdentifier` (`build_face_identifier`) según `inference.identity.enabled` y el `LiveService` (`build_live_service`) según `live.enabled` y el `ClipService` (`build_clip_service`) según `clips.enabled`. También el proveedor compartido del motor facial (`build_admin_engine_factory`) y la sincronización de la galería (`build_cloud_gallery`). |
 | `worker.py` | `process_frame`: detecta, cuenta, alimenta el motor de presencia y, si hay `fall_engine` y `tracker`, orquesta pistas + identidad (`identifier`) + caídas; emite por el sink. |
 | `logging_setup.py` | Logs JSON a **stderr** + redacción de secretos. |
 
@@ -444,6 +448,75 @@ anónima para siempre, así que mientras esté en cámara la extracción sigue c
 cámara indefinidamente; un backoff para pistas que llevan mucho sin matchear queda para más
 adelante.
 
+### Galería desde la nube
+
+Además de las fotos que deja el instalador a mano, la web de la familia puede subir fotos de
+identidad que el hub aplica solo. Es opt-in: se activa con `VITAHUB_FACE_PHOTOS_BUCKET` y requiere
+`uplink.enabled`; no depende de `clips.enabled`. Si el bucket está definido pero faltan
+`VITAHUB_CLIPS_ROLE_ALIAS` o `VITAHUB_IOT_CREDENTIALS_ENDPOINT`, el hub no arranca (`ConfigError`),
+igual que con los clips.
+
+**El shadow.** El hub se suscribe al named shadow `face-gallery` de su thing (el thing se llama
+como `hub_id`). La web escribe en `desired` solo `{"version": <ms epoch>}`, que siempre crece; el
+contenido no viaja por MQTT. Al conectar y en cada reconexión el hub pide el estado actual, así que
+una versión escrita mientras estaba apagado se aplica al volver.
+
+**El manifiesto.** El contenido está en S3, solo lectura para el hub:
+`hubs/<hub_id>/faces/manifest.json` con `{"version": n, "persons": {"<person_key>": ["<photoId>", ...]}}`
+y las fotos en `hubs/<hub_id>/faces/<person_key>/<photoId>.jpg`. `person_key` son 32 hex en
+minúscula y `photoId` un UUID canónico en minúscula; si un id no cumple, el hub rechaza el
+manifiesto entero. El orden de la web es siempre fotos, manifiesto y shadow. El hub lista el prefijo
+antes de leer, porque el rol solo tiene `s3:ListBucket` con la condición de prefijo y un
+`GetObject` de una clave inexistente da `403`, no `404`. Una foto que no aparece en el listado se
+trata como pendiente (carrera con un borrado); un manifiesto ausente del listado, como galería
+vacía. Un `403` u otro error al listar o leer no se interpreta así: aborta sin tocar el disco y
+reintenta con backoff, porque indica un permiso mal puesto. Si `manifest.version` es menor que
+`desired.version`, el manifiesto aún no es el bueno y se reintenta; si es mayor o igual, se aplica y
+se reporta `manifest.version`.
+
+**El debounce.** El hub espera 30 s sin cambios en `desired.version` antes de aplicar, para
+absorber una tanda de subidas como un solo cambio.
+
+**Aplicar.** Todo se descarga y se valida con el motor facial (una sola cara por foto) antes de
+tocar `/data/faces`, y entonces cada carpeta `person_key` se sustituye atómicamente. Es idempotente:
+se calcula siempre desde el manifiesto. Solo se tocan carpetas con forma de `person_key`; las del
+técnico con otro nombre no se tocan. Las fotos se guardan como `<photoId>.jpg`. Con la identidad
+apagada el hub descarga, valida y guarda igual, reporta `identity_enabled: false` y no reinicia: la
+nube nunca cambia `inference.fall` ni `inference.identity`. Las carpetas de la nube quedan activas
+sin editar `hub.yaml`, porque `load_gallery` carga toda carpeta de `/data/faces`.
+
+**`reported`.** Al terminar publica `{"version": n, "identity_enabled": bool, "photos": {...}}`, con
+`{"status": "accepted"}` o `{"status": "rejected", "reason": "no_face" | "multiple_faces" |
+"decode_error"}` por `photoId`. Un `photoId` ausente se lee como pendiente. El shadow fusiona JSON y
+una clave ausente no se borra, así que para quitar un `photoId` que ya no está en el manifiesto el
+hub manda `null`. La versión aplicada es la de `reported`: no hay fichero de estado local. Si
+`reported` no llegó a publicarse, el siguiente arranque vuelve a aplicar, no encuentra cambios en
+disco y no reinicia.
+
+**El reinicio.** El motor y la galería se cargan al arrancar, así que si cambió el conjunto de
+ficheros de alguna carpeta `person_key` y la identidad está encendida, el hub pide el reinicio con
+el mismo mecanismo que `POST /api/apply` (`stop.set`; Docker levanta el contenedor). Si solo cambió
+el `reported`, no reinicia. El hilo es daemon: el apagado no lo espera, y una sustitución a medias
+se recupera en el siguiente arranque.
+
+**Galería vacía.** Si el manifiesto trae `persons: {}` (al desvincular el hub la web escribe eso y
+borra los `.jpg`), las carpetas `person_key` desaparecen. Un `/data/faces` sin personas ya no
+impide arrancar: `build_face_identifier` avisa y devuelve `None`, y el hub vigila caídas sin
+identidad (`person: null`). Sigue siendo error que `/data/faces` no exista, porque eso es una
+instalación mal hecha.
+
+**Convivencia con la consola local.** La consola lista, muestra y borra también las fotos
+`<photoId>.jpg`, para que la validación de `/api/apply` y el `409` al borrar cuenten bien las fotos
+de la nube. Pero la nube manda sobre las carpetas `person_key`: una foto subida a mano a una de
+ellas se pierde en la siguiente sincronización. Para fotos del técnico hay que usar una carpeta con
+otro nombre. Consola y sincronización comparten una sola instancia del motor facial, que se carga la
+primera vez que alguien la pide.
+
+**Privacidad.** Las fotos viven en la nube, solo en el bucket `face-photos` y bajo consentimiento
+registrado, por decisión del usuario. Los embeddings siguen sin salir del hogar, y los eventos
+llevan solo `person_key` y confianza. Ni bytes de imagen, ni URLs, ni embeddings van a logs o
+eventos.
+
 ## Clip de caída
 
 Cuando una caída **tiene riesgo**, el hub monta un clip MP4 de ese momento y lo sube a S3 como
@@ -646,8 +719,10 @@ cameras: []                 # se autopobla al descubrir
 | `VITAHUB_IOT_CERT` | `/data/certs/certificate.pem.crt` | Certificado del hogar. |
 | `VITAHUB_IOT_KEY` | `/data/certs/private.pem.key` | Clave privada del hogar. |
 | `VITAHUB_CLIPS_BUCKET` | — (obligatoria si `clips.enabled`) | Bucket S3 de los clips de caída. |
-| `VITAHUB_CLIPS_ROLE_ALIAS` | — (obligatoria si `clips.enabled`) | Role alias de IoT para las credenciales de subida. |
-| `VITAHUB_IOT_CREDENTIALS_ENDPOINT` | — (obligatoria si `live.enabled` o `clips.enabled`) | Endpoint del credentials provider de IoT. |
+| `VITAHUB_CLIPS_ROLE_ALIAS` | — (obligatoria si `clips.enabled` o `VITAHUB_FACE_PHOTOS_BUCKET`) | Role alias de IoT para las credenciales de subida. |
+| `VITAHUB_IOT_CREDENTIALS_ENDPOINT` | — (obligatoria si `live.enabled`, `clips.enabled` o `VITAHUB_FACE_PHOTOS_BUCKET`) | Endpoint del credentials provider de IoT. |
+| `VITAHUB_FACE_PHOTOS_BUCKET` | — (vacía = sin galería desde la nube) | Bucket S3 `face-photos`; activa la sincronización (requiere `uplink.enabled`). Reutiliza `VITAHUB_CLIPS_ROLE_ALIAS`, que pasa a ser obligatoria con ella. |
+| `VITAHUB_FACE_PHOTOS_REGION` | `eu-west-1` | Región del bucket de fotos. |
 
 ## Empaquetado y despliegue
 

@@ -18,7 +18,9 @@ from vitahub.config import (
 )
 from vitahub.factory import (
     ClipService,
+    build_admin_engine_factory,
     build_clip_service,
+    build_cloud_gallery,
     build_detector,
     build_face_identifier,
     build_live_service,
@@ -320,6 +322,59 @@ def test_build_clip_service_bad_pem_is_config_error(tmp_path):
     with pytest.raises(ConfigError, match="bad.pem") as info:
         build_clip_service(cfg, StdoutJsonSink(), tmp_path / "q")
     assert info.value.__cause__ is not None
+
+
+def _gallery_config(**kw):
+    from vitahub.config import FaceGalleryConfig
+
+    cfg = _hub_config()
+    cfg.face_gallery = FaceGalleryConfig(
+        enabled=True,
+        bucket="vita-dev-face-photos",
+        role_alias="hub-clips",
+        credentials_endpoint="c.credentials.iot.eu-west-1.amazonaws.com",
+        **kw,
+    )
+    return cfg
+
+
+def test_build_cloud_gallery_none_when_disabled(tmp_path):
+    assert build_cloud_gallery(_hub_config(), object(), tmp_path, lambda: None, lambda: None) is None
+
+
+def test_build_cloud_gallery_none_without_link(tmp_path):
+    cfg = _gallery_config()
+    assert build_cloud_gallery(cfg, None, tmp_path, lambda: None, lambda: None) is None
+
+
+def test_build_cloud_gallery_bad_pem_is_config_error(tmp_path):
+    bad = tmp_path / "bad.pem"
+    bad.write_text("esto no es un PEM")
+    cfg = _gallery_config()
+    cfg.uplink = UplinkConfig(
+        enabled=True,
+        endpoint="abc-ats.iot.eu-west-1.amazonaws.com",
+        ca_path=str(bad),
+        cert_path=str(bad),
+        key_path=str(bad),
+    )
+    with pytest.raises(ConfigError, match="bad.pem") as info:
+        build_cloud_gallery(cfg, object(), tmp_path, lambda: None, lambda: None)
+    assert info.value.__cause__ is not None
+
+
+def test_admin_engine_factory_caches(tmp_path, monkeypatch):
+    calls = []
+
+    def _fake_from_weights(root):
+        calls.append(root)
+        return StubFaceEngine([])
+
+    monkeypatch.setattr(InsightFaceEngine, "from_weights", staticmethod(_fake_from_weights))
+    monkeypatch.setattr("vitahub.factory._require_face_weights", lambda root: None)
+    provider = build_admin_engine_factory({"VITAHUB_FACE_WEIGHTS": str(tmp_path)})
+    assert provider() is provider()
+    assert calls == [str(tmp_path)]
 
 
 def test_warn_missing_clip_cameras_logs(caplog):

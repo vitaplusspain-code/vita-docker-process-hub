@@ -21,6 +21,7 @@ from vitahub.factory import (
     ClipService,
     build_admin_engine_factory,
     build_clip_service,
+    build_cloud_gallery,
     build_detector,
     build_face_identifier,
     build_live_service,
@@ -139,17 +140,28 @@ def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
         _log.warning("descubrimiento: 0 cámaras encontradas — revisa ONVIF/credencial/red")
     warn_missing_clip_cameras(cfg)
 
+    # Un solo proveedor del motor facial para la consola local y la galería de
+    # la nube: se carga una vez, cuando alguien lo pide por primera vez.
+    faces_dir = Path(env.get("VITAHUB_FACES_DIR", _DEFAULT_FACES_DIR))
+    engine_provider = build_admin_engine_factory(env)
     admin_ctx = AdminContext(
-        faces_dir=Path(env.get("VITAHUB_FACES_DIR", _DEFAULT_FACES_DIR)),
+        faces_dir=faces_dir,
         config_path=config_path,
         env=env,
-        engine_factory=build_admin_engine_factory(env),
+        engine_factory=engine_provider,
         request_shutdown=stop.set,
         hub_id=cfg.hub_id,
     )
     httpd = _start_control_server_safe(
         service, env.get("VITAHUB_ADMIN_TOKEN", ""), admin_port(env), admin_ctx
     )
+
+    # Hilo daemon: el apagado no lo espera, y una sustitución a medias se
+    # recupera en el siguiente arranque. Pedir el reinicio es `stop.set`, igual
+    # que POST /api/apply: Docker levanta el contenedor de nuevo.
+    gallery = build_cloud_gallery(cfg, uplink.link, faces_dir, engine_provider, stop.set)
+    if gallery is not None:
+        gallery.start(stop)
 
     # Tras el rescan inicial: `cfg.cameras` ya tiene las cámaras descubiertas.
     # Si `live.enabled` es false no se crea nada y el hub es el de siempre.

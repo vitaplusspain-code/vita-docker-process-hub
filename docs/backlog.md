@@ -18,8 +18,10 @@ que vuelve se recupera sola por descubrimiento, que devuelve la URI real. Si alg
 cámara resultara indescubrible pero alcanzable, se reabre.
 
 **Pendiente relacionado — comando remoto:** el disparo de rescan desde la nube (app del
-técnico fuera del hogar) necesita el uplink del punto 3. La costura está lista: el downlink
-solo tiene que llamar a `RescanService.run_once()`.
+técnico fuera del hogar) ya no necesita inventar un downlink: existe uno, el named shadow
+`face-gallery` (ver `docs/como-funciona.md`, «Galería desde la nube»). El rescan remoto podría usar
+el mismo patrón (un shadow propio con `desired.version`, debounce y `reported`) y la costura sigue
+lista: el downlink solo tiene que llamar a `RescanService.run_once()`.
 
 ### 2. Endpoints ONVIF derivados de `XAddrs` / `GetServices`
 `discovery/onvif.py` **hardcodea** `http://{ip}:10000/onvif/device_service` y asume la ruta del

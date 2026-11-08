@@ -43,15 +43,16 @@ Fuera, con motivo:
   identidad por oclusiones resulta un problema real.
 - **Eventos de presencia con identidad.** `person_detected`/`person_count_changed` no cambian: el
   `EventEngine` trabaja con conteos y no se toca.
-- **Enrolamiento remoto o con UI.** Las fotos llegan por el volumen `/data`, como la config. Un
-  mecanismo de enrolamiento desde la nube necesitaría el downlink que no existe (backlog).
+- **Enrolamiento remoto: ya existe, en otro diseño.** La web sube las fotos y el hub las recibe por
+  el shadow `face-gallery` (ver `docs/como-funciona.md`, «Galería desde la nube»). Sigue sin haber UI
+  de enrolamiento en el hub más allá de la consola local.
 
 ## 2. Decisiones cerradas en brainstorming
 
 | Decisión | Elegido | Motivo |
 |---|---|---|
 | Filtrar vs etiquetar | Etiquetar, no filtrar | La caída de una visita también importa; un fallo de identidad no debe silenciar una alerta. Coherente con "el hub produce el dato, AWS decide" |
-| Método de identidad | Reconocimiento facial local | Lo más fiable a medio plazo; los embeddings nunca salen del hogar |
+| Método de identidad | Reconocimiento facial local | Lo más fiable a medio plazo; los embeddings nunca salen del hogar (las fotos subidas desde la web sí viven en la nube, ver «Privacidad» del contrato de eventos) |
 | Descartado: solo heurísticas sin biometría | — | Justo con visitas —el caso que motiva el slice— no distingue a nadie |
 | Descartado: identificar solo al disparar el evento | — | En una caída la cara casi nunca se ve (persona en el suelo, baja resolución): saldría `unknown` cuando más importa |
 | Momento de identificación | Oportunista, sobre la pista | La cara se ve al entrar/andar/sentarse; la etiqueta viaja con la pista hasta la caída |
@@ -126,8 +127,11 @@ Mismo envelope y mismo `schema_version: 1` — añadir un campo al payload es re
 - `person: null` cuando la pista no está identificada (identidad apagada, persona no enrolada o
   cara nunca vista).
 - `confidence` es la similitud coseno del match que etiquetó la pista, redondeada a 3 decimales.
-- **Privacidad:** del hogar sale solo el `person_id` (un alias elegido al enrolar) y un número.
-  Fotos y embeddings viven en `/data` y no se emiten, no se loguean y no se suben.
+- **Privacidad:** los eventos llevan solo la identidad de la persona (`person_key` en las fotos
+  llegadas de la nube, o el alias de la carpeta del técnico) y un número. Por decisión del usuario
+  (spec web §3.1), las fotos de identidad subidas desde la web se guardan en la nube, solo en el
+  bucket `face-photos` y bajo consentimiento registrado. Los embeddings siguen sin salir del hogar:
+  viven en memoria, en el hub. Ni fotos ni embeddings se emiten en eventos ni se loguean.
 
 ## 6. Errores y aislamiento
 

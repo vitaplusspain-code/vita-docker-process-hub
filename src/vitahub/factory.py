@@ -10,6 +10,8 @@ from vitahub.clips.buffer import PacketBuffer
 from vitahub.clips.trigger import ClipTriggerSink
 from vitahub.clips.uploader import ClipUploader, PendingQueue, s3_put
 from vitahub.config import ConfigError, HubConfig, InferenceConfig
+from vitahub.gallery.s3 import s3_get, s3_list
+from vitahub.gallery.service import CloudGalleryService
 from vitahub.identity.base import FaceEngine
 from vitahub.identity.face_id import FaceIdentifier
 from vitahub.identity.gallery import load_gallery
@@ -354,16 +356,73 @@ def build_face_identifier(cfg: HubConfig, env: Mapping[str, str]) -> FaceIdentif
 def build_admin_engine_factory(
     env: Mapping[str, str],
 ) -> Callable[[], FaceEngine]:
-    """Factory perezosa del engine del servidor de control.
+    """Proveedor perezoso, cacheado y con lock del motor facial.
 
-    La validación de pesos corre al LLAMARLA, no al construirla: un hub sin
+    Lo comparten la consola local y la sincronización de la galería desde la
+    nube: así no se cargan dos copias de InsightFaceEngine solo para validar.
+
+    La validación de pesos corre al LLAMARLO, no al construirlo: un hub sin
     pesos faciales debe arrancar igual (la identidad puede estar apagada) y
-    el error debe salir legible en la primera subida de foto.
+    el error debe salir legible en la primera subida de foto. Si falla no se
+    cachea nada, y el siguiente intento vuelve a probar.
     """
+    lock = threading.Lock()
+    cached: list[FaceEngine] = []
 
-    def _factory() -> FaceEngine:
-        root = env.get("VITAHUB_FACE_WEIGHTS", _DEFAULT_FACE_WEIGHTS)
-        _require_face_weights(root)
-        return InsightFaceEngine.from_weights(root)
+    def _provider() -> FaceEngine:
+        with lock:
+            if not cached:
+                root = env.get("VITAHUB_FACE_WEIGHTS", _DEFAULT_FACE_WEIGHTS)
+                _require_face_weights(root)
+                cached.append(InsightFaceEngine.from_weights(root))
+            return cached[0]
 
-    return _factory
+    return _provider
+
+
+def build_cloud_gallery(
+    cfg: HubConfig,
+    link: MqttLink | None,
+    faces_dir: Path,
+    engine: Callable[[], FaceEngine],
+    request_restart: Callable[[], None],
+) -> CloudGalleryService | None:
+    """La sincronización de la galería desde la nube, o None si no aplica.
+
+    No conecta nada aquí: la primera llamada a AWS ocurre en el hilo del
+    servicio, con reintento. Sin enlace MQTT (uplink apagado) no hay shadow
+    al que suscribirse.
+    """
+    gallery = cfg.face_gallery
+    if not gallery.enabled or link is None:
+        return None
+    # Mismo caso que en `build_clip_service`: un PEM ilegible revienta aquí y
+    # se relanza como `ConfigError` con las rutas y la causa.
+    try:
+        fetch = https_fetcher(
+            gallery.credentials_endpoint,
+            gallery.role_alias,
+            cfg.hub_id,
+            Path(cfg.uplink.ca_path),
+            Path(cfg.uplink.cert_path),
+            Path(cfg.uplink.key_path),
+        )
+    except Exception as exc:  # se traduce a ConfigError abajo (con la causa encadenada)
+        raise ConfigError(
+            "la galería de fotos desde la nube está activa pero no se pudo preparar la "
+            f"conexión al credentials provider ({exc}) — revisa que los certificados en "
+            f"{cfg.uplink.ca_path}, {cfg.uplink.cert_path} y {cfg.uplink.key_path} "
+            "existan y sean PEM válidos"
+        ) from exc
+    creds = IotCredentialsProvider(fetch)
+    _log.info("galería de fotos desde la nube habilitada (bucket %s)", gallery.bucket)
+    return CloudGalleryService(
+        link=link,
+        hub_id=cfg.hub_id,
+        faces_dir=faces_dir,
+        list_keys=s3_list(gallery.bucket, gallery.region, creds),
+        get_object=s3_get(gallery.bucket, gallery.region, creds),
+        engine=engine,
+        identity_enabled=cfg.inference.identity.enabled,
+        request_restart=request_restart,
+    )
