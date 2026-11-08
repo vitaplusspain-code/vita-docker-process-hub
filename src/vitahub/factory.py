@@ -99,6 +99,7 @@ def build_uplink(cfg: HubConfig) -> Uplink:
             cert=Path(cfg.uplink.cert_path),
             key=Path(cfg.uplink.key_path),
             on_connected=link.on_connected,
+            on_disconnected=link.on_disconnected,
         )
     except Exception as exc:  # se traduce a ConfigError abajo (con la causa encadenada)
         raise ConfigError(

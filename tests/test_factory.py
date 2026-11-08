@@ -70,7 +70,7 @@ def test_build_uplink_without_uplink_is_stdout_only():
 def test_build_uplink_with_uplink_fans_out_to_stdout_and_aws(monkeypatch):
     built: dict[str, object] = {}
 
-    def _fake_build_client(hub_id, endpoint, ca, cert, key, on_connected=None):
+    def _fake_build_client(hub_id, endpoint, ca, cert, key, on_connected=None, on_disconnected=None):
         built["hub_id"] = hub_id
         built["endpoint"] = endpoint
         return object()
@@ -102,7 +102,7 @@ def test_build_uplink_wraps_a_broken_client_as_config_error(monkeypatch):
     # válidos: un truncado revienta en client.tls_set() con ssl.SSLError.
     # build_uplink debe traducirlo a ConfigError con un mensaje de instalación,
     # no dejarlo escapar como traceback crudo.
-    def _broken_build_client(hub_id, endpoint, ca, cert, key, on_connected=None):
+    def _broken_build_client(hub_id, endpoint, ca, cert, key, on_connected=None, on_disconnected=None):
         raise ssl.SSLError("certificado corrupto")
 
     monkeypatch.setattr("vitahub.factory.build_client", _broken_build_client)

@@ -279,6 +279,21 @@ def test_link_routes_payload_to_handler():
     assert got == [b"x"]
 
 
+def test_overlapping_filters_run_each_handler_once():
+    link = MqttLink()
+    client = _LinkClient()
+    link.attach(client)
+    got_wild: list[bytes] = []
+    got_exact: list[bytes] = []
+    link.subscribe("a/#", got_wild.append)
+    link.subscribe("a/b", got_exact.append)
+    # paho llama una vez al callback de cada filtro que casa.
+    for f in ("a/#", "a/b"):
+        client.callbacks[f](client, None, _Msg("a/b", b"x"))
+    assert got_wild == [b"x"]
+    assert got_exact == [b"x"]
+
+
 def test_link_handler_error_is_logged_and_not_raised(caplog):
     link = MqttLink()
     client = _LinkClient()
@@ -332,3 +347,32 @@ def test_on_connected_called_only_on_accepted_connect():
     assert calls == []
     on_connect(_FakeClient(), None, None, 0, None)
     assert calls == [1]
+
+
+def test_listener_added_after_connect_runs_immediately_once():
+    link = MqttLink()
+    calls: list[int] = []
+    link.on_connected()
+    link.add_connect_listener(lambda: calls.append(1))
+    assert calls == [1]
+
+
+def test_listener_added_while_disconnected_waits_for_next_connect():
+    link = MqttLink()
+    calls: list[int] = []
+    link.on_connected()
+    link.on_disconnected()
+    link.add_connect_listener(lambda: calls.append(1))
+    assert calls == []
+    link.on_connected()
+    assert calls == [1]
+
+
+def test_subscribe_before_attach_sends_nothing_until_connected():
+    link = MqttLink()
+    client = _LinkClient()
+    link.subscribe("a/#", lambda payload: None)
+    link.attach(client)
+    assert client.subscribed == []
+    link.on_connected()
+    assert client.subscribed == [("a/#", 1)]

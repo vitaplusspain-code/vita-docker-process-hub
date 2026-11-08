@@ -66,6 +66,7 @@ class MqttLink:
         self._lock = threading.Lock()
         self._handlers: dict[str, Callable[[bytes], None]] = {}
         self._listeners: list[Callable[[], None]] = []
+        self._connected = False
 
     def attach(self, client: MqttClient) -> None:
         with self._lock:
@@ -81,9 +82,29 @@ class MqttLink:
     def add_connect_listener(self, fn: Callable[[], None]) -> None:
         with self._lock:
             self._listeners.append(fn)
+            already_connected = self._connected
+        # En un hub con internet la primera conexión suele ocurrir antes de que
+        # los servicios se registren: sin esta llamada inmediata no se enterarían
+        # hasta la siguiente reconexión.
+        if already_connected:
+            self._run_listener(fn)
+
+    def on_disconnected(self) -> None:
+        with self._lock:
+            self._connected = False
+
+    @staticmethod
+    def _run_listener(fn: Callable[[], None]) -> None:
+        # Cada listener aislado: uno que falla no deja sin aviso a los demás
+        # ni tumba el hilo de red de paho.
+        try:
+            fn()
+        except Exception:  # noqa: BLE001 — un listener roto no puede romper el enlace
+            _log.exception("fallo en un listener de conexión del uplink")
 
     def on_connected(self) -> None:
         with self._lock:
+            self._connected = True
             client = self._client
             filters = list(self._handlers)
             listeners = list(self._listeners)
@@ -91,12 +112,7 @@ class MqttLink:
             for topic_filter in filters:
                 self._subscribe_one(client, topic_filter)
         for fn in listeners:
-            # Cada listener aislado: uno que falla no deja sin aviso a los demás
-            # ni tumba el hilo de red de paho.
-            try:
-                fn()
-            except Exception:  # noqa: BLE001 — un listener roto no puede romper el enlace
-                _log.exception("fallo en un listener de conexión del uplink")
+            self._run_listener(fn)
 
     def publish(self, topic: str, payload: str) -> None:
         client = self._client
@@ -112,40 +128,37 @@ class MqttLink:
         try:
             # `message_callback_add` sustituye el callback del mismo filtro, así
             # que repetirlo en cada reconexión es inocuo.
-            client.message_callback_add(topic_filter, self._route)
+            client.message_callback_add(topic_filter, self._callback_for(topic_filter))
             client.subscribe(topic_filter, _LINK_QOS)
         except Exception:  # noqa: BLE001 — una suscripción fallida no puede tumbar el arranque
             _log.exception("no se pudo suscribir a %s", topic_filter)
 
-    def _route(self, client: object, userdata: object, message: Any) -> None:
-        """Entrega el payload al handler del filtro que casa con el topic.
+    def _callback_for(self, topic_filter: str) -> Callable[[object, object, Any], None]:
+        def _callback(client: object, userdata: object, message: Any) -> None:
+            self._deliver(topic_filter, message)
+
+        return _callback
+
+    def _deliver(self, topic_filter: str, message: Any) -> None:
+        """Entrega el payload al handler de ESTE filtro.
+
+        paho ya casa los comodines y llama al callback de cada filtro que
+        casa, una vez por filtro: si todos compartieran un enrutador que
+        recorre los handlers, los filtros solapados (`a/#` y `a/b`) ejecutarían
+        cada handler varias veces. El handler se busca al llamar, así que
+        volver a suscribir el mismo filtro lo sustituye.
 
         Un handler que lanza se loguea y se descarta: esto corre en el hilo de
         red de paho y una excepción lo mataría. Nunca se loguea el payload.
         """
-        topic = str(message.topic)
         with self._lock:
-            handlers = list(self._handlers.items())
-        for topic_filter, handler in handlers:
-            if _topic_matches(topic_filter, topic):
-                try:
-                    handler(bytes(message.payload))
-                except Exception:  # noqa: BLE001 — no se mata el hilo de paho
-                    _log.exception("fallo procesando un mensaje de %s", topic)
-
-
-def _topic_matches(topic_filter: str, topic: str) -> bool:
-    """Comodines MQTT `+` y `#` (sin topics `$` en filtros que empiezan por comodín)."""
-    f = topic_filter.split("/")
-    t = topic.split("/")
-    for i, part in enumerate(f):
-        if part == "#":
-            return True
-        if i >= len(t):
-            return False
-        if part != "+" and part != t[i]:
-            return False
-    return len(f) == len(t)
+            handler = self._handlers.get(topic_filter)
+        if handler is None:
+            return
+        try:
+            handler(bytes(message.payload))
+        except Exception:  # noqa: BLE001 — no se mata el hilo de paho
+            _log.exception("fallo procesando un mensaje de %s", message.topic)
 
 
 def topic_for(prefix: str, hub_id: str) -> str:
@@ -209,6 +222,7 @@ def build_client(
     cert: Path,
     key: Path,
     on_connected: Callable[[], None] | None = None,
+    on_disconnected: Callable[[], None] | None = None,
 ) -> MqttClient:
     """Cliente MQTT con TLS mutuo, conectando en segundo plano.
 
@@ -248,21 +262,31 @@ def build_client(
     client.reconnect_delay_set(min_delay=1, max_delay=120)
     on_connect, on_connect_fail = _make_connect_callbacks(on_connected)
     client.on_connect = on_connect
-    client.on_disconnect = _on_disconnect
+    client.on_disconnect = _make_on_disconnect(on_disconnected)
     client.on_connect_fail = on_connect_fail
     client.connect_async(endpoint, _PORT, keepalive=_KEEPALIVE_S)
     client.loop_start()
     return client
 
 
-def _on_disconnect(
-    client: object,
-    userdata: object,
-    flags: object,
-    reason_code: object,
-    properties: object = None,
-) -> None:
-    _log.warning("uplink desconectado (%s), reintentando en segundo plano", reason_code)
+def _make_on_disconnect(
+    on_disconnected: Callable[[], None] | None,
+) -> Callable[[object, object, object, object, object], None]:
+    def _on_disconnect(
+        client: object,
+        userdata: object,
+        flags: object,
+        reason_code: object,
+        properties: object = None,
+    ) -> None:
+        _log.warning("uplink desconectado (%s), reintentando en segundo plano", reason_code)
+        if on_disconnected is not None:
+            try:
+                on_disconnected()
+            except Exception:  # noqa: BLE001 — no se mata el hilo de paho
+                _log.exception("fallo en el aviso de desconexión del uplink")
+
+    return _on_disconnect
 
 
 # Cuántos intentos fallidos deben pasar, tras el primero de cada episodio,
