@@ -11,6 +11,7 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import cv2
 import numpy as np
@@ -18,7 +19,18 @@ import numpy as np
 from vitahub.identity.base import FaceEngine
 
 _PERSON_ID_RE = re.compile(r"^[a-z0-9-]{1,32}$")
-_PHOTO_NAME_RE = re.compile(r"^\d{3}\.jpg$")
+# photoId de la nube: UUID canónico en minúscula (acordado con la web).
+CLOUD_PHOTO_ID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+# Fotos del técnico (NNN.jpg) o de la nube (<photoId>.jpg).
+_PHOTO_NAME_RE = re.compile(
+    r"^(?:\d{3}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jpg$"
+)
+# La numeración secuencial solo cuenta las del técnico.
+_LOCAL_PHOTO_NAME_RE = re.compile(r"^\d{3}\.jpg$")
+
+PhotoReason = Literal["no_face", "multiple_faces", "decode_error"]
 
 
 class EnrollmentError(Exception):
@@ -26,6 +38,14 @@ class EnrollmentError(Exception):
         super().__init__(message)
         self.message = message
         self.status = status
+
+
+class PhotoRejected(EnrollmentError):
+    """Foto no válida; `reason` es el motivo que se reporta a la nube."""
+
+    def __init__(self, message: str, reason: PhotoReason) -> None:
+        super().__init__(message, status=400)
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -71,46 +91,69 @@ def photo_bytes(faces_dir: Path, person_id: str, photo: str) -> bytes:
     return path.read_bytes()
 
 
-def save_photo(
-    faces_dir: Path, person_id: str, data: bytes, engine: FaceEngine
-) -> str:
-    _check_person_id(person_id)
+def validate_photo(data: bytes, engine: FaceEngine) -> np.ndarray:
+    """Decodifica la foto y exige exactamente una cara. Devuelve la imagen."""
     array = np.frombuffer(data, dtype=np.uint8)
-    image = cv2.imdecode(array, cv2.IMREAD_COLOR)
+    image: np.ndarray | None = cv2.imdecode(array, cv2.IMREAD_COLOR)
     if image is None:
-        raise EnrollmentError("imagen ilegible: sube un JPEG o PNG válido")
-    faces = engine.extract(image)
-    if len(faces) != 1:
-        raise EnrollmentError(
-            f"la foto tiene {len(faces)} caras; debe tener exactamente una"
+        raise PhotoRejected(
+            "imagen ilegible: sube un JPEG o PNG válido", "decode_error"
         )
-    person_dir = faces_dir / person_id
-    person_dir.mkdir(parents=True, exist_ok=True)
-    existing = [
-        int(p.stem) for p in person_dir.iterdir() if _PHOTO_NAME_RE.match(p.name)
-    ]
-    name = f"{max(existing, default=0) + 1:03d}.jpg"
+    faces = engine.extract(image)
+    if len(faces) == 0:
+        raise PhotoRejected(
+            "la foto tiene 0 caras; debe tener exactamente una", "no_face"
+        )
+    if len(faces) > 1:
+        raise PhotoRejected(
+            f"la foto tiene {len(faces)} caras; debe tener exactamente una",
+            "multiple_faces",
+        )
+    return image
+
+
+def encode_jpeg(image: np.ndarray) -> bytes:
     # Se reencoda siempre a JPEG: normaliza el formato (aunque llegue PNG),
     # descarta EXIF y garantiza que lo guardado es exactamente lo validado.
     ok, buf = cv2.imencode(".jpg", image)
     if not ok:
         raise EnrollmentError("no se pudo codificar la imagen")
+    return bytes(buf)
+
+
+def write_atomic(path: Path, data: bytes) -> None:
     # Mismo patrón que write_settings: tempfile en el propio directorio +
     # fsync + os.replace, para que un corte de luz o una conexión perdida a
     # mitad de escritura jamás deje un JPEG truncado en la galería.
-    fd, tmp = tempfile.mkstemp(dir=str(person_dir), prefix=".photo-", suffix=".tmp")
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".photo-", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as f:
-            f.write(bytes(buf))
+            f.write(data)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, person_dir / name)
+        os.replace(tmp, path)
     except BaseException:
         try:
             os.unlink(tmp)
         except OSError:
             pass
         raise
+
+
+def save_photo(
+    faces_dir: Path, person_id: str, data: bytes, engine: FaceEngine
+) -> str:
+    _check_person_id(person_id)
+    image = validate_photo(data, engine)
+    person_dir = faces_dir / person_id
+    person_dir.mkdir(parents=True, exist_ok=True)
+    existing = [
+        int(p.stem)
+        for p in person_dir.iterdir()
+        if _LOCAL_PHOTO_NAME_RE.match(p.name)
+    ]
+    name = f"{max(existing, default=0) + 1:03d}.jpg"
+    write_atomic(person_dir / name, encode_jpeg(image))
     return name
 
 

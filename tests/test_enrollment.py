@@ -9,11 +9,13 @@ import pytest
 from vitahub.admin.enrollment import (
     EnrollmentError,
     PersonSummary,
+    PhotoRejected,
     delete_person,
     delete_photo,
     list_people,
     photo_bytes,
     save_photo,
+    validate_photo,
 )
 from vitahub.identity.base import FaceObservation
 from vitahub.identity.stub import StubFaceEngine
@@ -132,3 +134,52 @@ def test_delete_missing_is_404(tmp_path: Path) -> None:
     with pytest.raises(EnrollmentError) as exc:
         delete_person(tmp_path, "maria")
     assert exc.value.status == 404
+
+
+_CLOUD_NAME = "0b6c1c8e-3f0a-4c55-9d7e-2a1b3c4d5e6f.jpg"
+
+
+def test_validate_photo_reasons() -> None:
+    with pytest.raises(PhotoRejected) as e:
+        validate_photo(b"no-es-imagen", StubFaceEngine([]))
+    assert e.value.reason == "decode_error"
+    assert e.value.status == 400
+    with pytest.raises(PhotoRejected) as e:
+        validate_photo(_jpeg_bytes(), StubFaceEngine([[]]))
+    assert e.value.reason == "no_face"
+    with pytest.raises(PhotoRejected) as e:
+        validate_photo(_jpeg_bytes(), StubFaceEngine([[_face(), _face()]]))
+    assert e.value.reason == "multiple_faces"
+
+
+def test_validate_photo_returns_decoded_image() -> None:
+    image = validate_photo(_jpeg_bytes(), StubFaceEngine([[_face()]]))
+    assert image.shape == (32, 32, 3)
+
+
+def test_list_people_includes_cloud_photo_names(tmp_path: Path) -> None:
+    d = tmp_path / ("a" * 32)
+    d.mkdir()
+    (d / _CLOUD_NAME).write_bytes(_jpeg_bytes())
+    assert list_people(tmp_path)[0].photos == [_CLOUD_NAME]
+
+
+def test_save_photo_numbering_ignores_cloud_names(tmp_path: Path) -> None:
+    d = tmp_path / "ana"
+    d.mkdir()
+    (d / _CLOUD_NAME).write_bytes(_jpeg_bytes())
+    name = save_photo(tmp_path, "ana", _jpeg_bytes(), StubFaceEngine([[_face()]]))
+    assert name == "001.jpg"
+
+
+def test_photo_bytes_and_delete_accept_cloud_name(tmp_path: Path) -> None:
+    d = tmp_path / "ana"
+    d.mkdir()
+    (d / _CLOUD_NAME).write_bytes(b"x")
+    assert photo_bytes(tmp_path, "ana", _CLOUD_NAME) == b"x"
+    delete_photo(tmp_path, "ana", _CLOUD_NAME)
+    assert not (d / _CLOUD_NAME).exists()
+    with pytest.raises(EnrollmentError):
+        photo_bytes(tmp_path, "ana", "../x.jpg")
+    with pytest.raises(EnrollmentError):
+        delete_photo(tmp_path, "ana", "../x.jpg")
