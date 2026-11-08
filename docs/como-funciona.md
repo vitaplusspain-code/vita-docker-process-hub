@@ -502,8 +502,9 @@ se recupera en el siguiente arranque.
 **Galería vacía.** Si el manifiesto trae `persons: {}` (al desvincular el hub la web escribe eso y
 borra los `.jpg`), las carpetas `person_key` desaparecen. Un `/data/faces` sin personas ya no
 impide arrancar: `build_face_identifier` avisa y devuelve `None`, y el hub vigila caídas sin
-identidad (`person: null`). Sigue siendo error que `/data/faces` no exista, porque eso es una
-instalación mal hecha.
+identidad (`person: null`). Sigue siendo error (`ConfigError`, con la identidad encendida) que `/data/faces` no exista,
+porque eso es una instalación mal hecha; la sincronización crea la carpeta en la primera aplicación,
+así que un hub que ya sincronizó la tiene aunque la galería quedara vacía.
 
 **Convivencia con la consola local.** La consola lista, muestra y borra también las fotos
 `<photoId>.jpg`, para que la validación de `/api/apply` y el `409` al borrar cuenten bien las fotos

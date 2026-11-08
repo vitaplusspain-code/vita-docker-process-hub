@@ -52,7 +52,7 @@ Fuera, con motivo:
 | Decisión | Elegido | Motivo |
 |---|---|---|
 | Filtrar vs etiquetar | Etiquetar, no filtrar | La caída de una visita también importa; un fallo de identidad no debe silenciar una alerta. Coherente con "el hub produce el dato, AWS decide" |
-| Método de identidad | Reconocimiento facial local | Lo más fiable a medio plazo; los embeddings nunca salen del hogar (las fotos subidas desde la web sí viven en la nube, ver «Privacidad» del contrato de eventos) |
+| Método de identidad | Reconocimiento facial local | Lo más fiable a medio plazo; los embeddings nunca salen del hogar (las fotos subidas desde la web sí viven en la nube, ver «Privacidad» en §5) |
 | Descartado: solo heurísticas sin biometría | — | Justo con visitas —el caso que motiva el slice— no distingue a nadie |
 | Descartado: identificar solo al disparar el evento | — | En una caída la cara casi nunca se ve (persona en el suelo, baja resolución): saldría `unknown` cuando más importa |
 | Momento de identificación | Oportunista, sobre la pista | La cara se ve al entrar/andar/sentarse; la etiqueta viaja con la pista hasta la caída |
@@ -91,7 +91,7 @@ frame ─► PosePersonDetector ─► [Detection] ─► Tracker ─► [(Track
 | `analytics/fall_engine.py` | Deja de emparejar: `observe()` recibe los pares `(Track, Detection)` y las pistas perdidas del `Tracker`. El estado de episodio (`upright/candidate/reported`, señales, score) se queda como está, colgado de la pista. Los `fall_*` incluyen `person` desde la identidad de la pista. |
 | `worker.process_frame` | Orquesta: detect → track → (si identidad activa) identify → fall/presencia. El identificador va en `try` propio con log una-vez-por-cámara, mismo patrón que la analítica de caídas: la identidad nunca tumba la detección. |
 | `factory.py` | Construye `Tracker` (siempre que haya `fall_engine`) y `FaceIdentifier` + galería si `identity.enabled`. |
-| `config.load_config` | Parsea `inference.identity`. `enabled: true` sin fotos en `/data/faces/`, sin pesos, o con `inference.fall.enabled: false` → `ConfigError` legible (fail-fast: es un error de instalación y el técnico está delante). En v1 la identidad solo etiqueta eventos `fall_*`, así que sin caídas activas no tiene efecto y encenderla sería un error de configuración. |
+| `config.load_config` | Parsea `inference.identity`. `enabled: true` sin pesos, con `/data/faces/` inexistente, o con `inference.fall.enabled: false` → `ConfigError` legible (fail-fast: es un error de instalación y el técnico está delante). En v1 la identidad solo etiqueta eventos `fall_*`, así que sin caídas activas no tiene efecto y encenderla sería un error de configuración. |
 | `scripts/replay_video.py` | Acepta la galería para calibrar `match_threshold` con vídeos reales, como se calibró el score de caídas. |
 
 ## 4. Comportamiento de la identidad
@@ -138,8 +138,9 @@ Mismo envelope y mismo `schema_version: 1` — añadir un campo al payload es re
 - Fallo del `FaceIdentifier` en marcha (modelo que lanza, frame corrupto): se traga en el worker y
   se loguea una vez por cámara; caídas y presencia siguen. Sin identidad, los eventos salen con
   `person: null` — degradación silenciosa hacia el comportamiento actual.
-- Fallo al construir (pesos ilegibles, galería vacía con `enabled: true`): `ConfigError` en el
-  arranque, como el uplink.
+- Fallo al construir: pesos ilegibles → `ConfigError` en el arranque, como el uplink;
+  `/data/faces` inexistente → `ConfigError`; galería vacía (sin ninguna persona) → aviso en el log
+  y el hub arranca sin identidad (`person: null`), porque la nube puede dejar un hogar sin fotos.
 - La extracción del `Tracker` no cambia ninguna constante ni umbral del emparejamiento: los valores
   (`IOU_MATCH`, `CENTER_MATCH`, `TRACK_TTL_S`) se mueven con el código.
 
