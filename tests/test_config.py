@@ -619,3 +619,57 @@ def test_clips_section_must_be_mapping(tmp_path):
 def test_clips_disabled_still_validates_region(tmp_path):
     with pytest.raises(ConfigError, match="clips.region"):
         load_config(_write(tmp_path, VALID_YAML + "clips:\n  region: ''\n"), ENV)
+
+
+# --- Galería de fotos de identidad desde la nube (solo entorno) ---
+
+
+def _gallery_env(tmp_path: Path, **over: str) -> dict[str, str]:
+    env = _clips_env(tmp_path)
+    del env["VITAHUB_CLIPS_BUCKET"]
+    env["VITAHUB_FACE_PHOTOS_BUCKET"] = "vita-dev-faces"
+    env.update(over)
+    return env
+
+
+def test_face_gallery_disabled_without_bucket(tmp_path):
+    env = _gallery_env(tmp_path)
+    del env["VITAHUB_FACE_PHOTOS_BUCKET"]
+    cfg = load_config(_write(tmp_path, _clips_yaml(block="")), env)
+    assert cfg.face_gallery.enabled is False
+
+
+def test_face_gallery_disabled_without_uplink(tmp_path):
+    cfg = load_config(
+        _write(tmp_path, _clips_yaml(block="", uplink=False)), _gallery_env(tmp_path)
+    )
+    assert cfg.face_gallery.enabled is False
+
+
+def test_face_gallery_enabled_reuses_clips_role_alias(tmp_path):
+    path = _write(tmp_path, _clips_yaml(block=""))
+    cfg = load_config(path, _gallery_env(tmp_path))
+    gallery = cfg.face_gallery
+    assert gallery.enabled is True
+    assert gallery.bucket == "vita-dev-faces"
+    assert gallery.role_alias == "vita-dev-hub-clips"
+    assert gallery.credentials_endpoint == "abc.credentials.iot.eu-west-1.amazonaws.com"
+    assert gallery.region == "eu-west-1"
+    cfg = load_config(
+        path, _gallery_env(tmp_path, VITAHUB_FACE_PHOTOS_REGION="eu-south-2")
+    )
+    assert cfg.face_gallery.region == "eu-south-2"
+
+
+def test_face_gallery_bucket_without_role_alias_raises(tmp_path):
+    env = _gallery_env(tmp_path)
+    del env["VITAHUB_CLIPS_ROLE_ALIAS"]
+    with pytest.raises(ConfigError, match="VITAHUB_CLIPS_ROLE_ALIAS"):
+        load_config(_write(tmp_path, _clips_yaml(block="")), env)
+
+
+def test_gallery_key():
+    from vitahub.gallery.s3 import gallery_key
+
+    assert gallery_key("hub-1", "manifest.json") == "hubs/hub-1/faces/manifest.json"
+    assert gallery_key("hub-1") == "hubs/hub-1/faces/"

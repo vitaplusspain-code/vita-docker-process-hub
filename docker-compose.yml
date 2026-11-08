@@ -45,5 +45,9 @@ services:
       # eso ya se queja load_config con un mensaje que dice qué falta.
       VITAHUB_CLIPS_BUCKET: ${VITAHUB_CLIPS_BUCKET:-}
       VITAHUB_CLIPS_ROLE_ALIAS: ${VITAHUB_CLIPS_ROLE_ALIAS:-}
+      # Galería de fotos de identidad desde la nube: el bucket vacío la apaga.
+      # Reutiliza el role alias de clips y el endpoint de credenciales.
+      VITAHUB_FACE_PHOTOS_BUCKET: ${VITAHUB_FACE_PHOTOS_BUCKET:-}
+      VITAHUB_FACE_PHOTOS_REGION: ${VITAHUB_FACE_PHOTOS_REGION:-eu-west-1}
     volumes:
       - ./data:/data

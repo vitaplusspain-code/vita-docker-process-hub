@@ -105,6 +105,15 @@ class ClipsConfig:
 
 
 @dataclass
+class FaceGalleryConfig:
+    enabled: bool = False
+    bucket: str = ""
+    region: str = "eu-west-1"
+    role_alias: str = ""
+    credentials_endpoint: str = ""
+
+
+@dataclass
 class HubConfig:
     hub_id: str
     discovery: DiscoveryConfig
@@ -114,6 +123,7 @@ class HubConfig:
     uplink: UplinkConfig = field(default_factory=UplinkConfig)
     live: LiveConfig = field(default_factory=LiveConfig)
     clips: ClipsConfig = field(default_factory=ClipsConfig)
+    face_gallery: FaceGalleryConfig = field(default_factory=FaceGalleryConfig)
 
 
 def _credentials_from_env(env: Mapping[str, str]) -> Credentials:
@@ -365,6 +375,35 @@ def _clips_from_raw(
     )
 
 
+def _face_gallery_from_env(env: Mapping[str, str], uplink: UplinkConfig) -> FaceGalleryConfig:
+    """Lee la galería de fotos de identidad de la nube, solo desde el entorno.
+
+    El bucket activa la función (no hay sección en `hub.yaml`) y no depende de
+    `clips.enabled`: reutiliza el role alias y el endpoint de credenciales de
+    los clips. Con el bucket definido pero sin ellos falla al arrancar, como
+    `clips`, en vez de dejar un hub que nunca sincroniza.
+    """
+    bucket = env.get("VITAHUB_FACE_PHOTOS_BUCKET", "")
+    if not bucket or not uplink.enabled:
+        return FaceGalleryConfig()
+    env_values: dict[str, str] = {}
+    for var in ("VITAHUB_IOT_CREDENTIALS_ENDPOINT", "VITAHUB_CLIPS_ROLE_ALIAS"):
+        value = env.get(var, "")
+        if not value:
+            raise ConfigError(
+                f"VITAHUB_FACE_PHOTOS_BUCKET está definida pero falta la variable de "
+                f"entorno {var} (la imprime scripts/provision-hub.sh del repo de arquitectura)"
+            )
+        env_values[var] = value
+    return FaceGalleryConfig(
+        enabled=True,
+        bucket=bucket,
+        region=env.get("VITAHUB_FACE_PHOTOS_REGION") or "eu-west-1",
+        role_alias=env_values["VITAHUB_CLIPS_ROLE_ALIAS"],
+        credentials_endpoint=env_values["VITAHUB_IOT_CREDENTIALS_ENDPOINT"],
+    )
+
+
 def _fall_from_raw(raw: object, detector: str) -> FallConfig:
     if raw is None:
         raw = {}
@@ -497,6 +536,7 @@ def load_config(path: Path, env: Mapping[str, str]) -> HubConfig:
         uplink=uplink,
         live=_live_from_raw(raw.get("live"), env, uplink, hub_id),
         clips=_clips_from_raw(raw.get("clips"), env, uplink, fall),
+        face_gallery=_face_gallery_from_env(env, uplink),
     )
 
 
