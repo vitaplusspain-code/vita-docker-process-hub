@@ -24,7 +24,7 @@ from vitahub.live.signaling import KvsSignaling, channel_name, resolve_endpoints
 from vitahub.live.source import SourcePool, live_targets, open_rtsp_track
 from vitahub.live.token import load_session_keys
 from vitahub.logging_setup import get_logger
-from vitahub.sinks.aws_iot import AwsIotSink, build_client, topic_for
+from vitahub.sinks.aws_iot import AwsIotSink, MqttLink, build_client, topic_for
 from vitahub.sinks.base import EventSink
 from vitahub.sinks.fanout import FanoutSink
 from vitahub.sinks.stdout_json import StdoutJsonSink
@@ -59,7 +59,19 @@ def build_detector(cfg: InferenceConfig, weights_path: str) -> Detector:
     raise ValueError(f"Detector desconocido: {cfg.detector}")
 
 
-def build_sink(cfg: HubConfig) -> EventSink:
+@dataclass
+class Uplink:
+    """El sink de eventos y, si el uplink está habilitado, el enlace MQTT.
+
+    `link` es None con el uplink apagado: quien lo necesite (la sincronización
+    de fotos) se queda sin él en vez de recibir un enlace que no va a ningún sitio.
+    """
+
+    sink: EventSink
+    link: MqttLink | None
+
+
+def build_uplink(cfg: HubConfig) -> Uplink:
     """El sink de stdout siempre; el de AWS solo si el uplink está habilitado.
 
     Con el uplink apagado devuelve el StdoutJsonSink pelado, sin envolverlo en
@@ -68,16 +80,17 @@ def build_sink(cfg: HubConfig) -> EventSink:
     """
     stdout: EventSink = StdoutJsonSink()
     if not cfg.uplink.enabled:
-        return stdout
+        return Uplink(sink=stdout, link=None)
 
     # `load_config` solo comprueba que los tres ficheros existen
     # (`Path.is_file()`); no que sean PEM válidos. Un fichero truncado o
     # ilegible pasa esa validación y revienta aquí, en `client.tls_set()`,
-    # con un `ssl.SSLError` que de otro modo escaparía de `build_sink` → `run`
+    # con un `ssl.SSLError` que de otro modo escaparía de `build_uplink` → `run`
     # → el `except Exception` de `main`: "fallo no controlado" + `exit(1)` +
     # bucle de reinicio, un traceback en vez de un mensaje de instalación. Se
     # relanza rápido — según el spec §4.4 es lo correcto, el técnico está
     # delante — pero como `ConfigError`, con la ruta y qué revisar.
+    link = MqttLink()
     try:
         client = build_client(
             hub_id=cfg.hub_id,
@@ -85,6 +98,7 @@ def build_sink(cfg: HubConfig) -> EventSink:
             ca=Path(cfg.uplink.ca_path),
             cert=Path(cfg.uplink.cert_path),
             key=Path(cfg.uplink.key_path),
+            on_connected=link.on_connected,
         )
     except Exception as exc:  # se traduce a ConfigError abajo (con la causa encadenada)
         raise ConfigError(
@@ -93,9 +107,10 @@ def build_sink(cfg: HubConfig) -> EventSink:
             f"{cfg.uplink.cert_path} y {cfg.uplink.key_path} sean PEM válidos "
             "y correspondan al mismo hogar dado de alta con scripts/provision-hub.sh"
         ) from exc
+    link.attach(client)
     topic = topic_for(cfg.uplink.topic_prefix, cfg.hub_id)
     _log.info("uplink habilitado hacia %s", topic)
-    return FanoutSink([stdout, AwsIotSink(client, topic)])
+    return Uplink(sink=FanoutSink([stdout, AwsIotSink(client, topic)]), link=link)
 
 
 def build_live_service(cfg: HubConfig, sink: EventSink) -> LiveService | None:
@@ -109,7 +124,7 @@ def build_live_service(cfg: HubConfig, sink: EventSink) -> LiveService | None:
     live = cfg.live
     # `https_fetcher` construye el contexto ssl al instante y `load_config` solo
     # comprueba que los ficheros existen: un PEM truncado o ilegible revienta
-    # aquí con `ssl.SSLError`/`FileNotFoundError`. Como en `build_sink`, se
+    # aquí con `ssl.SSLError`/`FileNotFoundError`. Como en `build_uplink`, se
     # relanza como `ConfigError` (el técnico está delante) con rutas y causa.
     try:
         fetch = https_fetcher(

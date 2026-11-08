@@ -6,6 +6,7 @@ from vitahub.models import Event
 from vitahub.sinks.aws_iot import (
     _WARN_EVERY_N_FAILURES,
     AwsIotSink,
+    MqttLink,
     _make_connect_callbacks,
     topic_for,
     warn_if_key_is_exposed,
@@ -226,3 +227,108 @@ def test_does_not_warn_when_the_private_key_is_locked_down(tmp_path, caplog):
     os.chmod(key, stat.S_IRUSR | stat.S_IWUSR)
     warn_if_key_is_exposed(key)
     assert caplog.text == ""
+
+
+class _LinkClient:
+    """Doble que registra suscripciones y callbacks de mensaje."""
+
+    def __init__(self) -> None:
+        self.subscribed: list[tuple[str, int]] = []
+        self.callbacks: dict[str, object] = {}
+        self.published: list[tuple[str, str, int]] = []
+
+    def publish(self, topic: str, payload: str, qos: int) -> object:
+        self.published.append((topic, payload, qos))
+        return None
+
+    def loop_stop(self) -> None: ...
+    def disconnect(self) -> None: ...
+
+    def subscribe(self, topic: str, qos: int) -> object:
+        self.subscribed.append((topic, qos))
+        return None
+
+    def message_callback_add(self, sub: str, callback) -> object:
+        self.callbacks[sub] = callback
+        return None
+
+
+class _Msg:
+    def __init__(self, topic: str, payload: bytes) -> None:
+        self.topic = topic
+        self.payload = payload
+
+
+def test_link_resubscribes_on_every_connect():
+    link = MqttLink()
+    client = _LinkClient()
+    link.attach(client)
+    link.subscribe("a/#", lambda payload: None)
+    link.on_connected()
+    link.on_connected()
+    assert client.subscribed == [("a/#", 1)] * 3
+
+
+def test_link_routes_payload_to_handler():
+    link = MqttLink()
+    client = _LinkClient()
+    link.attach(client)
+    got: list[bytes] = []
+    link.subscribe("a/#", got.append)
+    client.callbacks["a/#"](client, None, _Msg("a/b", b"x"))
+    assert got == [b"x"]
+
+
+def test_link_handler_error_is_logged_and_not_raised(caplog):
+    link = MqttLink()
+    client = _LinkClient()
+    link.attach(client)
+
+    def boom(payload: bytes) -> None:
+        raise RuntimeError("handler roto")
+
+    link.subscribe("a/#", boom)
+    client.callbacks["a/#"](client, None, _Msg("a/b", b"secreto"))
+    assert "fallo procesando un mensaje de a/b" in caplog.text
+    assert "secreto" not in caplog.text
+
+
+def test_connect_listener_runs_after_resubscribe_and_errors_are_isolated():
+    link = MqttLink()
+    client = _LinkClient()
+    link.attach(client)
+    link.subscribe("a/#", lambda payload: None)
+    client.subscribed.clear()
+    seen: list[int] = []
+
+    def broken() -> None:
+        raise RuntimeError("listener roto")
+
+    link.add_connect_listener(broken)
+    link.add_connect_listener(lambda: seen.append(len(client.subscribed)))
+    link.on_connected()
+    assert seen == [1]  # ya estaba suscrito cuando corrió el listener
+
+
+def test_link_publish_uses_qos1_and_swallows_errors():
+    link = MqttLink()
+    client = _LinkClient()
+    link.attach(client)
+    link.publish("t", "p")
+    assert client.published == [("t", "p", 1)]
+
+    class _Broken(_LinkClient):
+        def publish(self, topic: str, payload: str, qos: int) -> object:
+            raise RuntimeError("caído")
+
+    link.attach(_Broken())
+    link.publish("t", "p")  # no lanza
+
+
+def test_on_connected_called_only_on_accepted_connect():
+    calls: list[int] = []
+    on_connect, _fail = _make_connect_callbacks(lambda: calls.append(1))
+    on_connect(_FakeClient(), None, None, 5, None)
+    assert calls == []
+    on_connect(_FakeClient(), None, None, 0, None)
+    assert calls == [1]

@@ -22,7 +22,7 @@ from vitahub.factory import (
     build_detector,
     build_face_identifier,
     build_live_service,
-    build_sink,
+    build_uplink,
     warn_missing_clip_cameras,
 )
 from vitahub.identity.insightface_engine import InsightFaceEngine
@@ -61,21 +61,22 @@ def _hub_config(
     )
 
 
-def test_build_sink_without_uplink_is_stdout_only():
-    sink = build_sink(_hub_config(UplinkConfig(enabled=False)))
-    assert isinstance(sink, StdoutJsonSink)
+def test_build_uplink_without_uplink_is_stdout_only():
+    uplink = build_uplink(_hub_config(UplinkConfig(enabled=False)))
+    assert isinstance(uplink.sink, StdoutJsonSink)
+    assert uplink.link is None
 
 
-def test_build_sink_with_uplink_fans_out_to_stdout_and_aws(monkeypatch):
+def test_build_uplink_with_uplink_fans_out_to_stdout_and_aws(monkeypatch):
     built: dict[str, object] = {}
 
-    def _fake_build_client(hub_id, endpoint, ca, cert, key):
+    def _fake_build_client(hub_id, endpoint, ca, cert, key, on_connected=None):
         built["hub_id"] = hub_id
         built["endpoint"] = endpoint
         return object()
 
     monkeypatch.setattr("vitahub.factory.build_client", _fake_build_client)
-    sink = build_sink(
+    uplink = build_uplink(
         _hub_config(
             UplinkConfig(
                 enabled=True,
@@ -87,24 +88,26 @@ def test_build_sink_with_uplink_fans_out_to_stdout_and_aws(monkeypatch):
             )
         )
     )
+    sink = uplink.sink
     assert isinstance(sink, FanoutSink)
+    assert uplink.link is not None
     kinds = [type(s) for s in sink._sinks]
     assert StdoutJsonSink in kinds
     assert AwsIotSink in kinds
     assert built["hub_id"] == "hub-casa-lopez"
 
 
-def test_build_sink_wraps_a_broken_client_as_config_error(monkeypatch):
+def test_build_uplink_wraps_a_broken_client_as_config_error(monkeypatch):
     # load_config solo comprueba que los ficheros existen, no que sean PEM
     # válidos: un truncado revienta en client.tls_set() con ssl.SSLError.
-    # build_sink debe traducirlo a ConfigError con un mensaje de instalación,
+    # build_uplink debe traducirlo a ConfigError con un mensaje de instalación,
     # no dejarlo escapar como traceback crudo.
-    def _broken_build_client(hub_id, endpoint, ca, cert, key):
+    def _broken_build_client(hub_id, endpoint, ca, cert, key, on_connected=None):
         raise ssl.SSLError("certificado corrupto")
 
     monkeypatch.setattr("vitahub.factory.build_client", _broken_build_client)
     with pytest.raises(ConfigError, match="certificado corrupto"):
-        build_sink(
+        build_uplink(
             _hub_config(
                 UplinkConfig(
                     enabled=True,
@@ -118,9 +121,9 @@ def test_build_sink_wraps_a_broken_client_as_config_error(monkeypatch):
         )
 
 
-def test_build_sink_uses_the_contract_topic(monkeypatch):
+def test_build_uplink_uses_the_contract_topic(monkeypatch):
     monkeypatch.setattr("vitahub.factory.build_client", lambda **kw: object())
-    sink = build_sink(
+    uplink = build_uplink(
         _hub_config(
             UplinkConfig(
                 enabled=True,
@@ -132,7 +135,7 @@ def test_build_sink_uses_the_contract_topic(monkeypatch):
             )
         )
     )
-    aws = next(s for s in sink._sinks if isinstance(s, AwsIotSink))
+    aws = next(s for s in uplink.sink._sinks if isinstance(s, AwsIotSink))
     assert aws._topic == "vita/hub/hub-casa-lopez/events"
 
 

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import itertools
 import ssl
+import threading
 from collections.abc import Callable
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from vitahub.logging_setup import get_logger
 from vitahub.models import Event
@@ -34,6 +35,117 @@ class MqttClient(Protocol):
     # que describe correctamente lo que paho ofrece de verdad.
     def loop_stop(self) -> object: ...
     def disconnect(self) -> object: ...
+    def subscribe(self, topic: str, qos: int) -> object: ...
+    def message_callback_add(
+        self, sub: str, callback: Callable[[object, object, Any], None]
+    ) -> object: ...
+
+
+# QoS 1 para las suscripciones y las publicaciones del enlace: los mensajes del
+# shadow (la galería de fotos) no pueden perderse en un microcorte, a diferencia
+# de los eventos del sink, que siguen en QoS 0 (ver `_QOS`).
+_LINK_QOS = 1
+
+
+class MqttLink:
+    """Suscripciones y publicaciones sobre el mismo cliente que usa el sink.
+
+    paho con `clean_session=True` (el valor por defecto en MQTT 3.1.1) pierde
+    las suscripciones en cada reconexión: suscribir una sola vez al arrancar
+    deja al hub sordo tras el primer corte de internet. Por eso el enlace
+    recuerda los filtros y los vuelve a suscribir en cada `on_connected`, y
+    solo después avisa a los listeners (que suelen pedir el estado actual al
+    shadow y necesitan que la respuesta ya tenga suscripción esperándola).
+
+    El cliente se asigna con `attach` porque `build_client` necesita
+    `on_connected` antes de que el cliente exista.
+    """
+
+    def __init__(self) -> None:
+        self._client: MqttClient | None = None
+        self._lock = threading.Lock()
+        self._handlers: dict[str, Callable[[bytes], None]] = {}
+        self._listeners: list[Callable[[], None]] = []
+
+    def attach(self, client: MqttClient) -> None:
+        with self._lock:
+            self._client = client
+
+    def subscribe(self, topic_filter: str, handler: Callable[[bytes], None]) -> None:
+        with self._lock:
+            self._handlers[topic_filter] = handler
+            client = self._client
+        if client is not None:
+            self._subscribe_one(client, topic_filter)
+
+    def add_connect_listener(self, fn: Callable[[], None]) -> None:
+        with self._lock:
+            self._listeners.append(fn)
+
+    def on_connected(self) -> None:
+        with self._lock:
+            client = self._client
+            filters = list(self._handlers)
+            listeners = list(self._listeners)
+        if client is not None:
+            for topic_filter in filters:
+                self._subscribe_one(client, topic_filter)
+        for fn in listeners:
+            # Cada listener aislado: uno que falla no deja sin aviso a los demás
+            # ni tumba el hilo de red de paho.
+            try:
+                fn()
+            except Exception:  # noqa: BLE001 — un listener roto no puede romper el enlace
+                _log.exception("fallo en un listener de conexión del uplink")
+
+    def publish(self, topic: str, payload: str) -> None:
+        client = self._client
+        if client is None:
+            _log.warning("no se pudo publicar en %s: el enlace no tiene cliente", topic)
+            return
+        try:
+            client.publish(topic, payload, _LINK_QOS)
+        except Exception:  # noqa: BLE001 — el uplink caído no puede tumbar al llamante
+            _log.exception("no se pudo publicar en %s", topic)
+
+    def _subscribe_one(self, client: MqttClient, topic_filter: str) -> None:
+        try:
+            # `message_callback_add` sustituye el callback del mismo filtro, así
+            # que repetirlo en cada reconexión es inocuo.
+            client.message_callback_add(topic_filter, self._route)
+            client.subscribe(topic_filter, _LINK_QOS)
+        except Exception:  # noqa: BLE001 — una suscripción fallida no puede tumbar el arranque
+            _log.exception("no se pudo suscribir a %s", topic_filter)
+
+    def _route(self, client: object, userdata: object, message: Any) -> None:
+        """Entrega el payload al handler del filtro que casa con el topic.
+
+        Un handler que lanza se loguea y se descarta: esto corre en el hilo de
+        red de paho y una excepción lo mataría. Nunca se loguea el payload.
+        """
+        topic = str(message.topic)
+        with self._lock:
+            handlers = list(self._handlers.items())
+        for topic_filter, handler in handlers:
+            if _topic_matches(topic_filter, topic):
+                try:
+                    handler(bytes(message.payload))
+                except Exception:  # noqa: BLE001 — no se mata el hilo de paho
+                    _log.exception("fallo procesando un mensaje de %s", topic)
+
+
+def _topic_matches(topic_filter: str, topic: str) -> bool:
+    """Comodines MQTT `+` y `#` (sin topics `$` en filtros que empiezan por comodín)."""
+    f = topic_filter.split("/")
+    t = topic.split("/")
+    for i, part in enumerate(f):
+        if part == "#":
+            return True
+        if i >= len(t):
+            return False
+        if part != "+" and part != t[i]:
+            return False
+    return len(f) == len(t)
 
 
 def topic_for(prefix: str, hub_id: str) -> str:
@@ -90,7 +202,14 @@ def warn_if_key_is_exposed(key: Path) -> None:
         )
 
 
-def build_client(hub_id: str, endpoint: str, ca: Path, cert: Path, key: Path) -> MqttClient:
+def build_client(
+    hub_id: str,
+    endpoint: str,
+    ca: Path,
+    cert: Path,
+    key: Path,
+    on_connected: Callable[[], None] | None = None,
+) -> MqttClient:
     """Cliente MQTT con TLS mutuo, conectando en segundo plano.
 
     `connect_async` + `loop_start`: el arranque del hub NO se bloquea si el
@@ -100,6 +219,9 @@ def build_client(hub_id: str, endpoint: str, ca: Path, cert: Path, key: Path) ->
     El import va dentro de la función y no arriba: los tests inyectan un doble
     y nunca llegan aquí, así que la suite no paga el import ni depende de que
     paho esté instalado para recolectar los tests.
+
+    `on_connected` se llama solo cuando el broker acepta la conexión, en cada
+    (re)conexión: es el sitio donde volver a suscribirse.
     """
     import paho.mqtt.client as mqtt
 
@@ -124,7 +246,7 @@ def build_client(hub_id: str, endpoint: str, ca: Path, cert: Path, key: Path) ->
         tls_version=ssl.PROTOCOL_TLSv1_2,
     )
     client.reconnect_delay_set(min_delay=1, max_delay=120)
-    on_connect, on_connect_fail = _make_connect_callbacks()
+    on_connect, on_connect_fail = _make_connect_callbacks(on_connected)
     client.on_connect = on_connect
     client.on_disconnect = _on_disconnect
     client.on_connect_fail = on_connect_fail
@@ -152,7 +274,9 @@ def _on_disconnect(
 _WARN_EVERY_N_FAILURES = 30
 
 
-def _make_connect_callbacks() -> tuple[
+def _make_connect_callbacks(
+    on_connected: Callable[[], None] | None = None,
+) -> tuple[
     Callable[[object, object, object, object, object], None],
     Callable[[object, object], None],
 ]:
@@ -201,6 +325,8 @@ def _make_connect_callbacks() -> tuple[
         if str(reason_code) in ("0", "Success"):
             _log.info("uplink conectado a AWS IoT")
             failures = itertools.count(1)
+            if on_connected is not None:
+                on_connected()
         else:
             _log.warning("uplink rechazado por el broker: %s", reason_code)
 

@@ -24,7 +24,7 @@ from vitahub.factory import (
     build_detector,
     build_face_identifier,
     build_live_service,
-    build_sink,
+    build_uplink,
     warn_missing_clip_cameras,
 )
 from vitahub.ingest.rtsp import (
@@ -95,7 +95,8 @@ def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
         _log.info("analítica de caídas activada (min_score=%.2f)", cfg.inference.fall.min_score)
     tracker = Tracker() if fall_engine is not None else None
     monitor = ConnectionMonitor(cfg.hub_id)
-    sink = build_sink(cfg)
+    uplink = build_uplink(cfg)
+    sink = uplink.sink
     # El disparador de clips envuelve el sink ANTES de que lo capturen el
     # worker y el directo: todo evento pasa por él. Con clips apagados es None
     # y el sink es el de siempre.
