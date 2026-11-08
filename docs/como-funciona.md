@@ -85,7 +85,7 @@ Dos ideas de diseño que conviene retener:
 | `analytics/tracker.py` | `Tracker`: pistas (`Track`) por persona y cámara, emparejadas entre frames por IoU/cercanía de centros; la identidad viaja colgada de la pista. |
 | `analytics/fall_engine.py` | `FallEngine`: consume pistas del tracker y lleva, por pista, la máquina de estados de episodio → eventos `fall_*`. |
 | `identity/insightface_engine.py` | `InsightFaceEngine`: envoltorio de InsightFace (SCRFD + ArcFace) sobre los pesos embebidos. |
-| `identity/gallery.py` | `load_gallery`: fotos de `/data/faces/<person_id>/` → embedding medio por persona (en memoria). |
+| `identity/gallery.py` | `load_gallery`: fotos de `/data/faces/<person_id>/` → embedding medio por persona (en memoria). En carpetas `person_key` salta las fotos inválidas con un aviso. |
 | `identity/face_id.py` | `FaceIdentifier`: busca caras en pistas anónimas y etiqueta con regla de 2 coincidencias sobre `match_threshold`. |
 | `gallery/service.py` | `CloudGalleryService`: se suscribe al shadow `face-gallery`, espera el debounce, aplica el manifiesto y publica `reported`; pide el reinicio si cambió el disco. |
 | `gallery/apply.py` | Aplica el manifiesto a `/data/faces` con sustitución por carpeta `person_key`; descarga y valida todo antes de tocar el disco. |
@@ -483,7 +483,10 @@ se calcula siempre desde el manifiesto. Solo se tocan carpetas con forma de `per
 técnico con otro nombre no se tocan. Las fotos se guardan como `<photoId>.jpg`. Con la identidad
 apagada el hub descarga, valida y guarda igual, reporta `identity_enabled: false` y no reinicia: la
 nube nunca cambia `inference.fall` ni `inference.identity`. Las carpetas de la nube quedan activas
-sin editar `hub.yaml`, porque `load_gallery` carga toda carpeta de `/data/faces`.
+sin editar `hub.yaml`, porque `load_gallery` carga toda carpeta de `/data/faces`. Lo que se valida es el JPEG ya reencodado, el mismo fichero que se escribe. Al arrancar, en una
+carpeta `person_key` `load_gallery` salta con un aviso la foto ilegible o sin exactamente una cara, y
+también la persona que se queda sin fotos válidas: el hub nunca deja de arrancar por una foto de la
+nube. Las carpetas del técnico siguen dando `ConfigError`.
 
 **`reported`.** Al terminar publica `{"version": n, "identity_enabled": bool, "photos": {...}}`, con
 `{"status": "accepted"}` o `{"status": "rejected", "reason": "no_face" | "multiple_faces" |

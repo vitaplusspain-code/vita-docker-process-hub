@@ -14,7 +14,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from vitahub.admin.enrollment import PhotoRejected, encode_jpeg, validate_photo, write_atomic
+from vitahub.admin.enrollment import (
+    PhotoRejected,
+    decode_photo,
+    encode_jpeg,
+    validate_photo,
+    write_atomic,
+)
 from vitahub.gallery.manifest import PERSON_KEY_RE, Manifest
 from vitahub.gallery.shadow import PhotoStatus
 from vitahub.identity.base import FaceEngine
@@ -76,12 +82,15 @@ def apply_manifest(
             if data is None:
                 continue  # pendiente: ni se escribe ni se reporta
             try:
-                image = validate_photo(data, engine)
+                # Se valida el JPEG reencodado, que es lo que se escribe y lo que
+                # load_gallery leerá al arrancar, no la foto original.
+                jpeg = encode_jpeg(decode_photo(data))
+                validate_photo(jpeg, engine)
             except PhotoRejected as exc:
                 statuses[photo_id] = ("rejected", exc.reason)
                 continue
             statuses[photo_id] = ("accepted", None)
-            accepted.setdefault(key, {})[photo_id] = encode_jpeg(image)
+            accepted.setdefault(key, {})[photo_id] = jpeg
 
     existing = {
         p.name for p in faces_dir.iterdir() if p.is_dir() and PERSON_KEY_RE.fullmatch(p.name)
@@ -95,6 +104,9 @@ def apply_manifest(
         folder.mkdir(parents=True)
         for photo_id, jpeg in photos.items():
             write_atomic(folder / f"{photo_id}.jpg", jpeg)
+        # Las entradas de la carpeta deben estar en disco antes de moverla a su
+        # sitio: si no, un corte tras el rename puede dejar una persona vacía.
+        _fsync_dir(folder)
 
     # Fase 3: sustitución carpeta a carpeta.
     old.mkdir(exist_ok=True)

@@ -108,3 +108,52 @@ def test_load_gallery_photo_folder_no_valid_photos_raises(tmp_path):
     (d / "data.json").write_text("{}")
     with pytest.raises(ConfigError, match="no tiene fotos válidas"):
         load_gallery(tmp_path, StubFaceEngine([]))
+
+
+# Carpetas de la nube (forma de person_key): una foto mala no puede impedir
+# arrancar, porque nadie está delante para arreglarla.
+_KEY = "a" * 32
+
+
+def test_load_gallery_cloud_photo_without_face_is_skipped(tmp_path, caplog):
+    _photo(tmp_path, _KEY, "11111111-1111-1111-1111-111111111111.jpg")
+    _photo(tmp_path, "maria", "a.jpg")
+    engine = StubFaceEngine([[], [FaceObservation((0, 0, 8, 8), _unit([1, 0, 0]))]])
+    with caplog.at_level("WARNING"):
+        gallery = load_gallery(tmp_path, engine)
+    assert set(gallery.people) == {"maria"}
+    assert _KEY in caplog.text
+    assert "11111111-1111-1111-1111-111111111111.jpg" in caplog.text
+
+
+def test_load_gallery_cloud_photo_unreadable_is_skipped(tmp_path, caplog):
+    d = tmp_path / _KEY
+    d.mkdir()
+    (d / "basura.jpg").write_bytes(b"\xff\xff\xff\xff")
+    good = _photo(tmp_path, _KEY, "bueno.jpg")
+    engine = StubFaceEngine([[FaceObservation((0, 0, 8, 8), _unit([1, 0, 0]))]])
+    with caplog.at_level("WARNING"):
+        gallery = load_gallery(tmp_path, engine)
+    assert set(gallery.people) == {_KEY}
+    assert "basura.jpg" in caplog.text and good.name not in caplog.text
+
+
+def test_load_gallery_cloud_folder_with_two_faces_photo_is_skipped(tmp_path):
+    _photo(tmp_path, _KEY, "a.jpg")
+    two = [FaceObservation((0, 0, 4, 8), _unit([1, 0, 0])),
+           FaceObservation((4, 0, 8, 8), _unit([0, 1, 0]))]
+    assert load_gallery(tmp_path, StubFaceEngine([two])).people == {}
+
+
+def test_load_gallery_empty_cloud_folder_is_skipped(tmp_path, caplog):
+    (tmp_path / _KEY).mkdir()
+    with caplog.at_level("WARNING"):
+        assert load_gallery(tmp_path, StubFaceEngine([])).people == {}
+    assert _KEY in caplog.text
+
+
+def test_load_gallery_technician_folder_still_strict_next_to_cloud(tmp_path):
+    (tmp_path / _KEY).mkdir()
+    _photo(tmp_path, "maria", "a.jpg")
+    with pytest.raises(ConfigError, match="a.jpg"):
+        load_gallery(tmp_path, StubFaceEngine([[]]))

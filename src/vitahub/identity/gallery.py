@@ -7,9 +7,14 @@ en memoria; del hogar no sale ninguno.
 Sin personas la galería sale vacía: el hub arranca sin identidad en vez de
 fallar (la nube puede vaciar la galería). Los directorios que empiezan por "."
 son temporales de la sincronización y se ignoran.
+
+Las carpetas con forma de `person_key` son de la nube: una foto mala ahí se
+salta con un aviso, porque nadie está delante para arreglarla y el hub no puede
+dejar de arrancar por eso. Las del técnico siguen siendo estrictas.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,7 +23,10 @@ import numpy as np
 import numpy.typing as npt
 
 from vitahub.config import ConfigError
+from vitahub.gallery.manifest import PERSON_KEY_RE
 from vitahub.identity.base import FaceEngine
+
+logger = logging.getLogger(__name__)
 
 _PHOTO_SUFFIXES = (".jpg", ".jpeg", ".png")
 
@@ -61,7 +69,8 @@ def best_match(
 
 def load_gallery(faces_dir: Path, engine: FaceEngine) -> Gallery:
     """Carpeta inexistente, foto ilegible o persona sin fotos válidas: ConfigError legible
-    (error de instalación, el técnico está delante). Sin personas: galería vacía."""
+    (error de instalación, el técnico está delante). Sin personas: galería vacía.
+    En carpetas de la nube (`person_key`) la foto o la persona inválida se salta con aviso."""
     if not faces_dir.is_dir():
         raise ConfigError(
             f"carpeta de caras no existe: {faces_dir} — crea /data/faces/<person_id>/ "
@@ -69,15 +78,27 @@ def load_gallery(faces_dir: Path, engine: FaceEngine) -> Gallery:
         )
     people: dict[str, npt.NDArray[np.float32]] = {}
     for person_dir in sorted(p for p in faces_dir.iterdir() if p.is_dir() and not p.name.startswith(".")):
+        cloud = PERSON_KEY_RE.fullmatch(person_dir.name) is not None
         embeddings: list[npt.NDArray[np.float32]] = []
         for photo in sorted(person_dir.iterdir()):
             if photo.suffix.lower() not in _PHOTO_SUFFIXES:
                 continue
             image = cv2.imread(str(photo))
             if image is None:
+                if cloud:
+                    logger.warning("galería: se ignora la foto ilegible %s de %s", photo.name, person_dir.name)
+                    continue
                 raise ConfigError(f"foto de enrolamiento ilegible: {photo}")
             faces = engine.extract(image)
             if len(faces) != 1:
+                if cloud:
+                    logger.warning(
+                        "galería: se ignora la foto %s de %s: tiene %d caras",
+                        photo.name,
+                        person_dir.name,
+                        len(faces),
+                    )
+                    continue
                 # 0 caras = foto inútil; 2+ = ambigua (¿cuál es la persona?).
                 raise ConfigError(
                     f"la foto de enrolamiento {photo} tiene {len(faces)} caras; "
@@ -85,6 +106,9 @@ def load_gallery(faces_dir: Path, engine: FaceEngine) -> Gallery:
                 )
             embeddings.append(faces[0].embedding)
         if not embeddings:
+            if cloud:
+                logger.warning("galería: se ignora %s: no tiene fotos válidas", person_dir.name)
+                continue
             raise ConfigError(
                 f"la carpeta {person_dir} no tiene fotos válidas (.jpg/.jpeg/.png)"
             )

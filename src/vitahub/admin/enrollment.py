@@ -91,14 +91,20 @@ def photo_bytes(faces_dir: Path, person_id: str, photo: str) -> bytes:
     return path.read_bytes()
 
 
-def validate_photo(data: bytes, engine: FaceEngine) -> np.ndarray:
-    """Decodifica la foto y exige exactamente una cara. Devuelve la imagen."""
+def decode_photo(data: bytes) -> np.ndarray:
+    """Decodifica la foto; ilegible = PhotoRejected("decode_error")."""
     array = np.frombuffer(data, dtype=np.uint8)
     image: np.ndarray | None = cv2.imdecode(array, cv2.IMREAD_COLOR)
     if image is None:
         raise PhotoRejected(
             "imagen ilegible: sube un JPEG o PNG válido", "decode_error"
         )
+    return image
+
+
+def validate_photo(data: bytes, engine: FaceEngine) -> np.ndarray:
+    """Decodifica la foto y exige exactamente una cara. Devuelve la imagen."""
+    image = decode_photo(data)
     faces = engine.extract(image)
     if len(faces) == 0:
         raise PhotoRejected(
