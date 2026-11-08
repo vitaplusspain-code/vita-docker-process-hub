@@ -3,6 +3,10 @@
 Sin caché a propósito: recalcular al arrancar tarda segundos y hace que
 añadir o quitar fotos sea solo reiniciar el hub. Los embeddings viven solo
 en memoria; del hogar no sale ninguno.
+
+Sin personas la galería sale vacía: el hub arranca sin identidad en vez de
+fallar (la nube puede vaciar la galería). Los directorios que empiezan por "."
+son temporales de la sincronización y se ignoran.
 """
 from __future__ import annotations
 
@@ -56,14 +60,15 @@ def best_match(
 
 
 def load_gallery(faces_dir: Path, engine: FaceEngine) -> Gallery:
-    """Falla con ConfigError legible: es un error de instalación y el técnico está delante."""
+    """Carpeta inexistente, foto ilegible o persona sin fotos válidas: ConfigError legible
+    (error de instalación, el técnico está delante). Sin personas: galería vacía."""
     if not faces_dir.is_dir():
         raise ConfigError(
             f"carpeta de caras no existe: {faces_dir} — crea /data/faces/<person_id>/ "
             "con 3-5 fotos de la cara (distintas luces y ángulos)"
         )
     people: dict[str, npt.NDArray[np.float32]] = {}
-    for person_dir in sorted(p for p in faces_dir.iterdir() if p.is_dir()):
+    for person_dir in sorted(p for p in faces_dir.iterdir() if p.is_dir() and not p.name.startswith(".")):
         embeddings: list[npt.NDArray[np.float32]] = []
         for photo in sorted(person_dir.iterdir()):
             if photo.suffix.lower() not in _PHOTO_SUFFIXES:
@@ -84,9 +89,4 @@ def load_gallery(faces_dir: Path, engine: FaceEngine) -> Gallery:
                 f"la carpeta {person_dir} no tiene fotos válidas (.jpg/.jpeg/.png)"
             )
         people[person_dir.name] = mean_embedding(embeddings)
-    if not people:
-        raise ConfigError(
-            f"ninguna persona enrolada en {faces_dir} — crea /data/faces/<person_id>/ "
-            "con 3-5 fotos de la cara (distintas luces y ángulos)"
-        )
     return Gallery(people=people)

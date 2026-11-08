@@ -54,9 +54,13 @@ def test_load_gallery_averages_per_person(tmp_path):
     assert np.linalg.norm(gallery.people["maria"]) == pytest.approx(1.0)
 
 
-def test_load_gallery_empty_dir_raises(tmp_path):
-    with pytest.raises(ConfigError, match="ninguna persona enrolada"):
-        load_gallery(tmp_path, StubFaceEngine([]))
+def test_load_gallery_empty_dir_returns_empty(tmp_path):
+    assert load_gallery(tmp_path, StubFaceEngine([])).people == {}
+
+
+def test_load_gallery_ignores_dot_dirs(tmp_path):
+    (tmp_path / ".cloud-staging" / ("a" * 32)).mkdir(parents=True)
+    assert load_gallery(tmp_path, StubFaceEngine([])).people == {}
 
 
 def test_load_gallery_photo_without_face_raises(tmp_path):

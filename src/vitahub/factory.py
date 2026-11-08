@@ -318,6 +318,14 @@ def build_face_identifier(cfg: HubConfig, env: Mapping[str, str]) -> FaceIdentif
         )
     engine = InsightFaceEngine.from_weights(root)
     gallery = load_gallery(faces_dir, engine)
+    if not gallery.people:
+        # Sin personas el hub arranca igual y vigila caídas con person: null;
+        # la galería puede llegar luego desde la nube.
+        _log.warning(
+            "identidad activada pero ninguna persona enrolada en %s: "
+            "el hub arranca sin identidad", faces_dir,
+        )
+        return None
     _log.info(
         "identidad activada: %d personas enroladas (umbral %.2f)",
         len(gallery.people), cfg.inference.identity.match_threshold,

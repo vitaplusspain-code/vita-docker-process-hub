@@ -25,6 +25,8 @@ from vitahub.factory import (
     build_sink,
     warn_missing_clip_cameras,
 )
+from vitahub.identity.insightface_engine import InsightFaceEngine
+from vitahub.identity.stub import StubFaceEngine
 from vitahub.inference.person_pose_yolo import PosePersonDetector
 from vitahub.inference.person_yolo import PersonDetector
 from vitahub.inference.stub import StubDetector
@@ -201,6 +203,21 @@ def test_build_face_identifier_missing_faces_dir_raises(tmp_path):
     }
     with pytest.raises(ConfigError, match="no existe"):
         build_face_identifier(cfg, env)
+
+
+def test_build_face_identifier_empty_gallery_returns_none(tmp_path, monkeypatch, caplog):
+    faces = tmp_path / "faces"
+    faces.mkdir()
+    monkeypatch.setattr("vitahub.factory._require_face_weights", lambda root: None)
+    monkeypatch.setattr(
+        InsightFaceEngine, "from_weights", staticmethod(lambda root: StubFaceEngine([]))
+    )
+    cfg = _hub_config(identity=IdentityConfig(enabled=True))
+    env = {"VITAHUB_FACES_DIR": str(faces)}
+    with caplog.at_level(logging.WARNING, logger="factory"):
+        assert build_face_identifier(cfg, env) is None
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("ninguna persona enrolada" in m for m in messages)
 
 
 def test_admin_engine_factory_missing_weights_raises_config_error(tmp_path):
