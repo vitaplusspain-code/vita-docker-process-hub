@@ -9,6 +9,7 @@ from typing import Any
 
 import cv2
 import numpy as np
+import pytest
 
 from vitahub.config import ConfigError
 from vitahub.gallery.s3 import gallery_key
@@ -208,6 +209,30 @@ def test_each_reconnect_asks_again(tmp_path: Path) -> None:
     h.link.connect()
     h.service.step(100)
     assert len(h.link.on(TOPICS.get)) == 2
+
+
+def test_delta_before_get_response_waits_for_get_not_busy(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.store.put_manifest(10, {K1: [P1]})
+    h.store.put_photo(K1, P1)
+    h.link.connect()
+    assert h.service.step(0) == 30
+    h.delta(10, at=5)
+    # Debounce vencido sin respuesta al get: step(35) repite el get (vencido en
+    # 30) y desde ahí se espera al siguiente, en 65; nunca 0.
+    returned = [h.service.step(t) for t in (35, 35.001, 36, 59.9)]
+    assert returned == [30, pytest.approx(29.999), 29, pytest.approx(5.1)]
+    assert 0.0 not in returned
+    assert h.link.updates() == []
+
+    h.clock.t = 60
+    h.link.deliver(TOPICS.get_accepted, {"state": {"desired": {"version": 10}}})
+    returned.append(h.service.step(60))
+    assert returned[-1] == 30
+    assert 0.0 not in returned
+    assert h.link.updates() == []
+    assert h.service.step(90) is None
+    assert [u["state"]["reported"]["version"] for u in h.link.updates()] == [10]
 
 
 def test_delta_resets_debounce(tmp_path: Path) -> None:

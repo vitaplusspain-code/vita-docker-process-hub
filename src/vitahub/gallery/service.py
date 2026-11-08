@@ -189,7 +189,10 @@ class CloudGalleryService:
         if apply_due and desired is not None:
             self._attempt(now, desired, previous_ids)
         with self._lock:
-            pending = [t for t in (self._get_at, self._apply_at) if t is not None]
+            # Sin respuesta al `get` la aplicación vencida no puede correr: contarla
+            # devolvería 0 y el bucle giraría sin parar hasta la respuesta.
+            apply_at = self._apply_at if self._synced else None
+            pending = [t for t in (self._get_at, apply_at) if t is not None]
         return max(0.0, min(pending) - now) if pending else None
 
     def _attempt(self, now: float, desired: int, previous_ids: frozenset[str]) -> None:
