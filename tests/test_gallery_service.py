@@ -13,7 +13,7 @@ import pytest
 
 from vitahub.config import ConfigError
 from vitahub.gallery.s3 import gallery_key
-from vitahub.gallery.service import CloudGalleryService
+from vitahub.gallery.service import LOG_EVERY, CloudGalleryService
 from vitahub.gallery.shadow import identity_only_payload, shadow_topics
 from vitahub.identity.base import FaceEngine, FaceObservation
 from vitahub.identity.stub import StubFaceEngine
@@ -478,3 +478,134 @@ def test_thread_applies_and_stops(tmp_path: Path) -> None:
     stop.set()
     thread.join(timeout=5)
     assert not thread.is_alive()
+
+
+def test_get_rejected_404_marks_synced(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.store.put_manifest(10, {K1: [P1]})
+    h.store.put_photo(K1, P1)
+    h.link.connect()
+    h.service.step(0)
+    h.link.deliver(TOPICS.get_rejected, {"code": 404, "message": "No shadow exists"})
+    # Sin shadow, un delta posterior se aplica sin esperar a otro get.
+    h.delta(10, at=1)
+    h.service.step(31)
+    assert [u["state"]["reported"]["version"] for u in h.link.updates()] == [10]
+    assert h.link.updates()[0]["state"]["reported"]["photos"] == {P1: {"status": "accepted"}}
+
+
+def test_get_rejected_other_code_keeps_retrying(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    h = Harness(tmp_path)
+    h.store.put_manifest(10, {K1: [P1]})
+    h.store.put_photo(K1, P1)
+    h.link.connect()
+    h.service.step(0)
+    with caplog.at_level("WARNING"):
+        h.link.deliver(TOPICS.get_rejected, {"code": 500, "message": "secreto interno"})
+    assert "500" in caplog.text and "secreto interno" not in caplog.text
+    # No cuenta como sincronizado: el delta no se aplica y el get se repite.
+    h.delta(10, at=1)
+    assert h.service.step(30) == 30
+    assert len(h.link.on(TOPICS.get)) == 2
+    h.service.step(31)
+    assert h.link.updates() == []
+
+
+def test_update_rejected_is_subscribed_and_logs_code(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    h = Harness(tmp_path)
+    assert TOPICS.update_rejected in h.link.handlers
+    with caplog.at_level("WARNING"):
+        h.link.deliver(TOPICS.update_rejected, {"code": 400, "message": "payload con datos"})
+    assert "400" in caplog.text and "payload con datos" not in caplog.text
+
+
+def test_retry_warning_does_not_log_exception_message(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    class EndpointConnectionError(Exception):
+        pass
+
+    class ClientError(Exception):
+        def __init__(self) -> None:
+            super().__init__("https://bucket.s3.amazonaws.com/hubs/hub-1/faces/x?X-Amz-Signature=abc")
+            self.response = {"Error": {"Code": "AccessDenied"}}
+
+    errors: list[Exception] = [
+        EndpointConnectionError("Could not connect to https://bucket.s3.amazonaws.com/hubs/hub-1/faces/"),
+        ClientError(),
+    ]
+
+    def failing(prefix: str) -> frozenset[str]:
+        raise errors.pop(0)
+
+    h = Harness(tmp_path)
+    h.service._list_keys = failing
+    h.sync({"desired": {"version": 10}})
+    with caplog.at_level("WARNING"):
+        h.service.step(30)
+        # Fuerza otro aviso: el segundo episodio empieza en el fallo 11.
+        h.service._failures = LOG_EVERY
+        h.service.step(90)
+    assert "EndpointConnectionError" in caplog.text
+    assert "ClientError" in caplog.text and "AccessDenied" in caplog.text
+    assert "https://" not in caplog.text and "amazonaws" not in caplog.text
+
+
+def test_failure_log_is_throttled(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    h = Harness(tmp_path)
+    h.store.put_manifest(10, {K1: [P1]})
+    h.store.list_errors = 11
+    h.sync({"desired": {"version": 10}})
+    now = 30.0
+    with caplog.at_level("WARNING", logger="vitahub.gallery.service"):
+        for _ in range(11):
+            delay = h.service.step(now)
+            assert delay is not None
+            now += delay
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert h.store.list_calls == 11
+    # El primero del episodio y luego uno de cada LOG_EVERY: intentos 1 y 11.
+    assert len(warnings) == 2
+    assert "intento 1," in warnings[0].getMessage()
+    assert f"intento {LOG_EVERY + 1}," in warnings[1].getMessage()
+
+
+def test_unexpected_step_error_waits_before_next_attempt(tmp_path: Path) -> None:
+    link = FakeLink()
+    clock = FakeClock()
+    service = CloudGalleryService(
+        link=link,  # type: ignore[arg-type]
+        hub_id=HUB,
+        faces_dir=tmp_path,
+        list_keys=lambda prefix: frozenset(),
+        get_object=lambda key: b"",
+        engine=lambda: StubFaceEngine([]),
+        identity_enabled=True,
+        request_restart=lambda: None,
+        clock=clock,
+    )
+    calls: list[float] = []
+
+    def broken(now: float) -> float | None:
+        calls.append(now)
+        raise RuntimeError("bug")
+
+    service.step = broken  # type: ignore[method-assign]
+    stop = threading.Event()
+    service.start(stop)
+    try:
+        deadline = time.monotonic() + 5
+        while not calls and time.monotonic() < deadline:
+            time.sleep(0.01)
+        # Señales seguidas (deltas) no fuerzan otro intento antes de 60 s.
+        end = time.monotonic() + 0.3
+        while time.monotonic() < end:
+            link.deliver(TOPICS.update_delta, {"state": {"version": 1}})
+            time.sleep(0.01)
+        assert calls == [0.0]
+        clock.t = 61.0
+        deadline = time.monotonic() + 5
+        while len(calls) < 2 and time.monotonic() < deadline:
+            link.deliver(TOPICS.update_delta, {"state": {"version": 1}})
+            time.sleep(0.01)
+        assert calls[:2] == [0.0, 61.0]
+    finally:
+        stop.set()

@@ -75,6 +75,16 @@ def parse_delta_version(raw: bytes) -> int | None:
     return _as_int(state.get("version"))
 
 
+def parse_error_code(raw: bytes) -> int | None:
+    """`code` de un `*/rejected`, o None si falta o el JSON está roto.
+
+    Solo se lee el código: el `message` no se loguea."""
+    try:
+        return _as_int(_as_dict(json.loads(raw)).get("code"))
+    except ValueError:
+        return None
+
+
 def reported_payload(
     version: int,
     identity_enabled: bool,

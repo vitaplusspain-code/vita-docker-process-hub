@@ -20,6 +20,7 @@ from vitahub.gallery.s3 import gallery_key
 from vitahub.gallery.shadow import (
     identity_only_payload,
     parse_delta_version,
+    parse_error_code,
     parse_get_accepted,
     reported_payload,
     shadow_topics,
@@ -89,21 +90,32 @@ class CloudGalleryService:
         self._link.subscribe(self._topics.get_accepted, self._on_get_accepted)
         self._link.subscribe(self._topics.get_rejected, self._on_get_rejected)
         self._link.subscribe(self._topics.update_delta, self._on_delta)
+        self._link.subscribe(self._topics.update_rejected, self._on_update_rejected)
         # Después de suscribir: si ya hay conexión el listener corre ya y su
         # `get` necesita la suscripción a la respuesta.
         self._link.add_connect_listener(self._on_connected)
         threading.Thread(target=self._run, args=(stop,), name="face-gallery", daemon=True).start()
 
     def _run(self, stop: threading.Event) -> None:
+        # Tras un fallo inesperado no se vuelve a intentar antes de esta hora:
+        # la espera se trocea en STOP_POLL_S y una señal la corta, así que sin
+        # ella un fallo fijo dejaría una traza por segundo.
+        not_before = 0.0
         while not stop.is_set():
             # Se limpia antes de `step`: una señal que llegue durante `step`
             # hace que la espera siguiente vuelva enseguida.
             self._wake.clear()
-            try:
-                timeout = self.step(self._clock())
-            except Exception:  # el hilo de la galería no puede morir
-                logger.exception("face-gallery: fallo inesperado en el bucle")
-                timeout = BACKOFF_FIRST_S
+            now = self._clock()
+            timeout: float | None
+            if now < not_before:
+                timeout = not_before - now
+            else:
+                try:
+                    timeout = self.step(now)
+                except Exception:  # el hilo de la galería no puede morir
+                    logger.exception("face-gallery: fallo inesperado en el bucle")
+                    not_before = self._clock() + BACKOFF_FIRST_S
+                    timeout = BACKOFF_FIRST_S
             self._wake.wait(STOP_POLL_S if timeout is None else min(timeout, STOP_POLL_S))
 
     # --- callbacks MQTT (hilo de paho) ---------------------------------------
@@ -143,12 +155,23 @@ class CloudGalleryService:
         self._wake.set()
 
     def _on_get_rejected(self, raw: bytes) -> None:
-        # Normalmente 404: el shadow aún no existe. No hay nada que aplicar;
-        # cuando la web escriba `desired` llegará un delta.
+        code = parse_error_code(raw)
+        if code != 404:
+            # 403, 429, 500...: el shadow puede existir y no se conocen los
+            # photoId reportados. `_get_at` sigue fijado: el get se repite.
+            logger.warning("face-gallery: get rechazado (código %s), se reintenta", code)
+            return
+        # 404: el shadow aún no existe. No hay nada que aplicar; cuando la web
+        # escriba `desired` llegará un delta.
         with self._lock:
             self._get_at = None
             self._synced = True
         self._wake.set()
+
+    def _on_update_rejected(self, raw: bytes) -> None:
+        # Sin reintento: la siguiente aplicación vuelve a publicar el reported.
+        # Solo el código: el mensaje puede repetir el payload.
+        logger.warning("face-gallery: reported rechazado (código %s)", parse_error_code(raw))
 
     def _on_delta(self, raw: bytes) -> None:
         try:
@@ -210,12 +233,11 @@ class CloudGalleryService:
                     self._apply_at = now + delay
             if (failures - 1) % LOG_EVERY == 0:
                 logger.warning(
-                    "face-gallery: no se pudo aplicar la versión %d (intento %d, reintento en %.0f s): %s: %s",
+                    "face-gallery: no se pudo aplicar la versión %d (intento %d, reintento en %.0f s): %s",
                     desired,
                     failures,
                     delay,
-                    type(exc).__name__,
-                    exc,
+                    _describe(exc),
                 )
 
     def _apply(self, now: float, desired: int, previous_ids: frozenset[str]) -> None:
@@ -251,6 +273,17 @@ class CloudGalleryService:
         # Después de publicar: el reinicio corta el proceso y el reported se perdería.
         if result.changed and self._identity_enabled:
             self._request_restart()
+
+
+def _describe(exc: Exception) -> str:
+    """Tipo del error y, si es de botocore, su código. Nunca el mensaje: el de
+    botocore lleva el endpoint y la clave S3 (URLs prohibidas en logs)."""
+    if isinstance(exc, _ApplyFailed):
+        return f"{type(exc).__name__}: {exc}"  # mensaje propio, sin URLs
+    response = getattr(exc, "response", None)
+    error = response.get("Error") if isinstance(response, dict) else None
+    code = error.get("Code") if isinstance(error, dict) else None
+    return f"{type(exc).__name__} ({code})" if isinstance(code, str) else type(exc).__name__
 
 
 def _max(a: int | None, b: int | None) -> int | None:

@@ -164,18 +164,18 @@ def test_validates_reencoded_image_with_engine(tmp_path: Path) -> None:
 
     class Recorder(StubFaceEngine):
         def extract(self, image: object) -> list[FaceObservation]:
-            ok, buf = cv2.imencode(".png", image)  # type: ignore[call-overload]
+            _ok, buf = cv2.imencode(".png", image)  # type: ignore[call-overload]
             seen.append(bytes(buf))
             return super().extract(image)
 
     # Ruido: con píxeles variados el JPEG con pérdida cambia al reencodar, así
     # que la imagen original y la guardada ya no coinciden.
     noisy = np.random.default_rng(0).integers(0, 256, (32, 32, 3), dtype=np.uint8)
-    ok, buf = cv2.imencode(".jpg", noisy)
+    _ok, buf = cv2.imencode(".jpg", noisy)
     manifest = Manifest(version=1, persons={K1: (P1,)})
     apply_manifest(tmp_path, manifest, _fetch_from({P1: bytes(buf)}), Recorder([[_face()]]))
     stored = cv2.imread(str(tmp_path / K1 / f"{P1}.jpg"))
-    ok, buf = cv2.imencode(".png", stored)
+    _ok, buf = cv2.imencode(".png", stored)
     assert seen == [bytes(buf)]
 
 

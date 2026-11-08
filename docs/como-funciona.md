@@ -459,7 +459,9 @@ igual que con los clips.
 **El shadow.** El hub se suscribe al named shadow `face-gallery` de su thing (el thing se llama
 como `hub_id`). La web escribe en `desired` solo `{"version": <ms epoch>}`, que siempre crece; el
 contenido no viaja por MQTT. Al conectar y en cada reconexión el hub pide el estado actual, así que
-una versión escrita mientras estaba apagado se aplica al volver.
+una versión escrita mientras estaba apagado se aplica al volver. Si el `get` se rechaza con `404`
+el shadow aún no existe y el hub espera al primer delta; con otro código lo repite cada 30 s y no
+aplica nada hasta tener respuesta. Un `update` rechazado solo se avisa en el log, con su código.
 
 **El manifiesto.** El contenido está en S3, solo lectura para el hub:
 `hubs/<hub_id>/faces/manifest.json` con `{"version": n, "persons": {"<person_key>": ["<photoId>", ...]}}`
