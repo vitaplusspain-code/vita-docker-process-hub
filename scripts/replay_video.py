@@ -138,10 +138,16 @@ def main() -> int:
     parser.add_argument(
         "--inactivity-min",
         type=float,
-        default=5.0,
-        help="minutos de quietud para abrir un episodio (bajo para clips cortos)",
+        default=None,
+        help="minutos de quietud para abrir un episodio (por defecto 5; requiere --faces)",
     )
     args = parser.parse_args()
+    if args.inactivity_min is not None and not args.faces:
+        print(
+            "aviso: --inactivity-min no tiene efecto sin --faces "
+            "(la inactividad solo corre con identidad)",
+            file=sys.stderr,
+        )
     summary = replay(
         args.video,
         args.weights,
@@ -150,7 +156,7 @@ def main() -> int:
         args.presence,
         args.faces,
         args.match_threshold,
-        args.inactivity_min,
+        5.0 if args.inactivity_min is None else args.inactivity_min,
     )
     print(json.dumps(summary, ensure_ascii=False), file=sys.stderr)
     return 0

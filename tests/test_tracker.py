@@ -215,3 +215,17 @@ def test_frames_resume_after_long_gap_expire_before_resume():
     assert u.expired == u.parked
     assert u.matches[0].track.identity is None
     assert u.resumed == []
+
+
+def test_parked_identity_of_person_already_on_live_track_is_not_resumed():
+    tracker = Tracker()
+    _, last, _ = _park(tracker)  # "ana" aparcada en BOX
+    other = (400, 0, 440, 120)
+    # "ana" aparece ya identificada en otra caja (p. ej. por cara) y sigue viva.
+    u = tracker.observe("cam-a", [_person(other)], last + 4.0)
+    u.matches[0].track.identity = TrackIdentity("ana", 0.9)
+    # Una pista anónima en la caja aparcada no hereda: "ana" ya está en pantalla.
+    u2 = tracker.observe("cam-a", [_person(other), _person(BOX)], last + 4.5)
+    anon = next(m.track for m in u2.matches if m.detection.bbox == BOX)
+    assert anon.identity is None
+    assert u2.resumed == []

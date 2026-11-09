@@ -91,8 +91,8 @@ frame ─► PosePersonDetector ─► [Detection] ─► Tracker ─► [(Track
 | Pieza | Cambio |
 |---|---|
 | `analytics/fall_engine.py` | Deja de emparejar: `observe()` recibe los pares `(Track, Detection)` y las pistas perdidas del `Tracker`. El estado de episodio (`upright/candidate/reported`, señales, score) se queda como está, colgado de la pista. Los `fall_*` incluyen `person` desde la identidad de la pista. |
-| `worker.process_frame` | Orquesta: detect → track → (si identidad activa) identify → fall/presencia. El identificador va en `try` propio con log una-vez-por-cámara, mismo patrón que la analítica de caídas: la identidad nunca tumba la detección. |
-| `factory.py` | Construye `Tracker` (siempre que haya `fall_engine`) y `FaceIdentifier` + galería si `identity.enabled`. |
+| `worker.process_frame` | Orquesta: detect → track → (si identidad activa) identify → fall/inactividad/presencia. El identificador va en `try` propio con log una-vez-por-cámara, mismo patrón que la analítica de caídas: la identidad nunca tumba la detección. |
+| `factory.py` | Construye `Tracker` (siempre que haya `fall_engine` o la inactividad esté habilitada) y `FaceIdentifier` + galería si `identity.enabled`. |
 | `config.load_config` | Parsea `inference.identity`. `enabled: true` sin pesos, con `/data/faces/` inexistente, o con `inference.fall.enabled: false` → `ConfigError` legible (fail-fast: es un error de instalación y el técnico está delante). La identidad etiqueta eventos `fall_*` y también `inactivity_*` (ver [inactividad por persona](2026-11-09-inactividad-persona-design.md)); sin ninguna de las dos analíticas activas no tiene efecto y encenderla sería un error de configuración. Por eso exige `inference.fall.enabled` o `inference.inactivity.enabled`. |
 | `scripts/replay_video.py` | Acepta la galería para calibrar `match_threshold` con vídeos reales, como se calibró el score de caídas. |
 

@@ -16,6 +16,10 @@ _log = get_logger("worker")
 # un bug en el engine se loguea una vez, no en cada frame a 2 fps.
 _fall_failure_logged: set[str] = set()
 
+# Igual que _fall_failure_logged pero para el tracker: su fallo no debe
+# enmascarar un fallo posterior de la analítica de caídas.
+_tracker_failure_logged: set[str] = set()
+
 # Igual que _fall_failure_logged pero para la analítica de inactividad.
 _inactivity_failure_logged: set[str] = set()
 
@@ -56,8 +60,8 @@ def process_frame(
                         )
         except Exception:  # noqa: BLE001 — el tracker no debe tumbar la presencia
             update = None
-            if camera.id not in _fall_failure_logged:
-                _fall_failure_logged.add(camera.id)
+            if camera.id not in _tracker_failure_logged:
+                _tracker_failure_logged.add(camera.id)
                 _log.exception(
                     "cam %s: error en el seguimiento (se silencia a partir de ahora)",
                     camera.id,

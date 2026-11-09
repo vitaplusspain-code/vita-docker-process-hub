@@ -307,6 +307,15 @@ De la implementación:
   razonamiento, sin medir con vídeo real.
 - **Límite conocido:** una identidad aparcada puede ser heredada por otra persona cuya cara nunca
   se ve (spec de inactividad §4.3).
+- **La prueba de "quieta" del tracker es más estricta que el radio de pies del motor:** el tracker
+  exige IoU de caja ≥ `STILL_IOU` durante `PARK_STILL_S`, el motor solo un radio de pies. Una
+  persona sentada que gesticula y se oculta en menos de 4 s no se aparca y el episodio acaba con
+  `track_lost` (vía conocida por la que falla el arreglo de ocultaciones). Calibrar con clips de
+  replay de gente gesticulando sentada.
+- **Las identidades provisionales pueden reaparcarse indefinidamente:** una pista reanudada que
+  vuelve a quedarse quieta y oculta se aparca otra vez sin que ninguna cara la confirme jamás.
+- **El payload de `fall_detected` no lleva marca de identidad provisional:** añadirla cambia el
+  contrato de caídas y afecta al motor de reglas, así que se difiere.
 
 ## Verificación pendiente en hardware real
 Las partes de red (descubrimiento ONVIF, captura RTSP) no corren en CI por diseño. Validar

@@ -129,14 +129,21 @@ class InactivityEngine:
         for resume in update.resumed:
             ep = cam.episodes.pop(resume.previous_track_id, None)
             if ep is not None:
-                # El tiempo oculto cuenta: mismo ancla, inicio y episode_id.
+                # El tiempo oculto cuenta: mismo ancla, inicio y episode_id. Una
+                # salida ruidosa previa a la ocultación no debe contar como
+                # "fuera desde hace rato" al volver.
+                ep.out_since = None
                 cam.episodes[resume.track.track_id] = ep
 
         for match in update.matches:
             track = match.track
             identity = track.identity
             if identity is None:
-                cam.episodes.pop(track.track_id, None)
+                ep = cam.episodes.pop(track.track_id, None)
+                if ep is not None and ep.emitted:
+                    # La pista pierde su identidad con el episodio emitido: se
+                    # cierra, no se deja huérfano.
+                    events.append(self._ended(camera, ep, now, now, "identity_changed"))
                 continue
             det = match.detection
             feet = feet_point(det)
@@ -147,6 +154,14 @@ class InactivityEngine:
                     events.append(self._ended(camera, ep, now, now, "identity_changed"))
                 ep = None
             if ep is None:
+                if any(
+                    other.person_id == identity.person_id
+                    for tid, other in cam.episodes.items()
+                    if tid != track.track_id
+                ):
+                    # Una persona, un episodio por cámara (spec §3.4.6): la pista
+                    # más nueva espera sin episodio a que acabe la anterior.
+                    continue
                 ep = _Episode(
                     person_id=identity.person_id,
                     person=_person_payload(identity),

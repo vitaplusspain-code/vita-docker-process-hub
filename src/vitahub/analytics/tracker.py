@@ -203,8 +203,16 @@ class Tracker:
                 still_since=now,
             )
             self._next_id += 1
+            # Una persona ya presente en una pista viva de la cámara no hereda
+            # su identidad aparcada (sería un segundo "ella"): la entrada
+            # aparcada caduca por su cuenta.
+            live_ids = {
+                t.identity.person_id for t in cam.tracks if t.identity is not None
+            }
             best = max(
-                cam.parked, key=lambda p: _iou(p.bbox, det.bbox), default=None
+                (p for p in cam.parked if p.identity.person_id not in live_ids),
+                key=lambda p: _iou(p.bbox, det.bbox),
+                default=None,
             )
             if best is not None and _iou(best.bbox, det.bbox) >= RESUME_IOU:
                 track.identity = replace(best.identity, provisional=True)

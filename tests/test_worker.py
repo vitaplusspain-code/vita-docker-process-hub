@@ -247,3 +247,25 @@ def test_fall_exception_does_not_skip_inactivity(monkeypatch):
     )
     assert spy.calls == 1
     assert [e.type for e in sink.events] == ["inactivity_started"]
+
+
+def test_tracker_exception_is_logged_once_and_presence_still_emits(caplog, monkeypatch):
+    class _BoomTracker:
+        def observe(self, camera_id, detections, now):
+            raise RuntimeError("boom")
+
+    # Registros aislados: el del tracker no debe compartirse con el de caídas.
+    monkeypatch.setattr(worker_module, "_fall_failure_logged", set())
+    monkeypatch.setattr(worker_module, "_tracker_failure_logged", set(), raising=False)
+    engine = EventEngine(hub_id="hub-1", present_after_s=2.0, absent_after_s=5.0)
+    sink = _RecordingSink()
+    detector = StubDetector(person_count=1)
+    for now in (0.0, 1.0, 2.0):
+        emitted = process_frame(
+            CAM, None, detector, engine, sink, now=now,
+            fall_engine=None, tracker=_BoomTracker(),
+        )
+    assert [e.type for e in emitted] == ["person_detected"]
+    assert sum("seguimiento" in r.message for r in caplog.records) == 1
+    # el fallo del tracker no tapa un fallo posterior de la analítica de caídas
+    assert worker_module._fall_failure_logged == set()

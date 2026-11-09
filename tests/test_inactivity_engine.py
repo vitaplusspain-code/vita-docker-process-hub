@@ -354,3 +354,63 @@ def test_moving_track_lost_ends_immediately():
     ended = events[0].payload
     assert ended["reason"] == "track_lost"
     assert ended["ended_at"] == _wall(74)
+
+
+# --- reanudación: ruido, personas duplicadas e identidad perdida ---
+
+
+def test_stale_out_since_does_not_survive_resume():
+    engine, tracker, clock = _setup(min_minutes=1.0)
+    frames = [(i * 0.5, [_ankles_at(150)]) for i in range(141)]  # 0..70 s quieta
+    frames.append((70.5, [_ankles_at(300)]))  # un frame ruidoso fuera
+    frames += [(71.0 + i * 0.5, []) for i in range(14)]  # 7 s oculta: aparcada
+    frames.append((78.0, [_ankles_at(300)]))  # reanuda con otro frame ruidoso
+    frames += [(78.5 + i * 0.5, [_ankles_at(150)]) for i in range(10)]
+    events = _run(engine, tracker, clock, frames)
+    assert [e.type for e in events] == ["inactivity_started"]
+
+
+def test_resume_clearly_outside_radius_ends_with_moved():
+    engine, tracker, clock = _setup(min_minutes=1.0)
+    frames = [(i * 0.5, [_ankles_at(150)]) for i in range(141)]
+    frames += [(70.5 + i * 0.5, []) for i in range(14)]  # oculta y aparcada
+    # vuelve claramente fuera del radio (50 px) y se queda ahí
+    frames += [(78.0 + i * 0.5, [_ankles_at(300)]) for i in range(10)]
+    events = _run(engine, tracker, clock, frames)
+    assert [e.type for e in events] == ["inactivity_started", "inactivity_ended"]
+    assert events[1].payload["reason"] == "moved"
+
+
+def test_second_track_of_same_person_gets_no_second_episode():
+    engine, tracker, clock = _setup(min_minutes=1.0)
+    other = (400, 200, 500, 400)
+    frames = _still(SIT, 0, 70)
+    # A se pierde y se aparca; B aparece en otra caja y es "ana" por cara
+    frames += [(70.5 + i * 0.5, [_det(other)]) for i in range(8)]
+    # C aparece en la caja aparcada: "ana" ya vive en B, no hereda
+    frames += [(74.5 + i * 0.5, [_det(other), _det(SIT)]) for i in range(200)]
+    events = _run(engine, tracker, clock, frames)
+    started = [e for e in events if e.type == "inactivity_started"]
+    assert len(started) == 1
+    assert len({e.payload["episode_id"] for e in started}) == 1
+
+
+def test_engine_does_not_open_second_episode_for_same_person_in_camera():
+    # Orden inverso: la pista nueva con la misma persona llega con identidad
+    # propia (sin pasar por el aparcado) mientras la antigua sigue viva.
+    engine, tracker, clock = _setup(min_minutes=1.0)
+    frames = [(i * 0.5, [_det(SIT), _det((400, 200, 500, 400))]) for i in range(300)]
+    events = _run(engine, tracker, clock, frames)
+    started = [e for e in events if e.type == "inactivity_started"]
+    assert len(started) == 1
+
+
+def test_identity_dropped_while_emitted_ends_with_identity_changed():
+    engine, tracker, clock = _setup()
+    events = _run(engine, tracker, clock, _still(SIT, 0, 310))
+    assert [e.type for e in events] == ["inactivity_started"]
+    tracker._cameras[CAM.id].tracks[0].identity = None
+    more = _run(engine, tracker, clock, _still(SIT, 310.5, 312), ident=lambda det: None)
+    assert [e.type for e in more] == ["inactivity_ended"]
+    assert more[0].payload["reason"] == "identity_changed"
+    assert more[0].payload["ended_at"] == _wall(310.5)
