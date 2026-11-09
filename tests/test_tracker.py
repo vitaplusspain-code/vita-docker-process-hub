@@ -1,4 +1,10 @@
-from vitahub.analytics.tracker import TRACK_TTL_S, Tracker
+from vitahub.analytics.tracker import (
+    PARK_TTL_S,
+    TRACK_TTL_S,
+    Resume,
+    Tracker,
+    TrackIdentity,
+)
 from vitahub.models import Detection
 
 
@@ -93,3 +99,119 @@ def test_duplicate_detection_object_still_opens_two_tracks():
     update = tracker.observe("cam-a", [same, same], 0.5)
     assert len(update.matches) == 2
     assert len({m.track.track_id for m in update.matches}) == 2
+
+
+BOX = (10, 0, 50, 120)
+
+
+def _still_ana(tracker, bbox=BOX, seconds=5.0, who="ana"):
+    """Pista identificada y quieta `seconds` s; devuelve (pista, last_seen)."""
+    u = tracker.observe("cam-a", [_person(bbox)], 0.0)
+    track = u.matches[0].track
+    track.identity = TrackIdentity(who, 0.7)
+    t = 0.0
+    while t < seconds:
+        t += 1.0
+        tracker.observe("cam-a", [_person(bbox)], t)
+    return track, t
+
+
+def _park(tracker, bbox=BOX, who="ana"):
+    track, last = _still_ana(tracker, bbox, who=who)
+    u = tracker.observe("cam-a", [], last + TRACK_TTL_S)
+    return track, last, u
+
+
+def test_still_identified_track_is_parked_when_lost():
+    tracker = Tracker()
+    track, last, u = _park(tracker)
+    assert [t.track_id for t in u.lost] == [track.track_id]
+    assert len(u.parked) == 1
+    p = u.parked[0]
+    assert p.track_id == track.track_id
+    assert p.identity.person_id == "ana"
+    assert p.parked_at == last
+    assert p.bbox == BOX
+
+
+def test_moving_track_is_not_parked():
+    tracker = Tracker()
+    u = tracker.observe("cam-a", [_person((0, 0, 40, 120))], 0.0)
+    u.matches[0].track.identity = TrackIdentity("ana", 0.7)
+    for i in range(1, 8):  # desplazamiento de media caja: IoU < STILL_IOU
+        x = i * 20
+        tracker.observe("cam-a", [_person((x, 0, x + 40, 120))], float(i))
+    u = tracker.observe("cam-a", [], 7.0 + TRACK_TTL_S)
+    assert len(u.lost) == 1
+    assert u.parked == []
+
+
+def test_anonymous_track_is_not_parked():
+    tracker = Tracker()
+    tracker.observe("cam-a", [_person(BOX)], 0.0)
+    for t in range(1, 6):
+        tracker.observe("cam-a", [_person(BOX)], float(t))
+    u = tracker.observe("cam-a", [], 5.0 + TRACK_TTL_S)
+    assert len(u.lost) == 1
+    assert u.parked == []
+
+
+def test_new_track_in_same_box_resumes_parked_identity():
+    tracker = Tracker()
+    track, last, _ = _park(tracker)
+    u = tracker.observe("cam-a", [_person(BOX)], last + 4.0)
+    new = u.matches[0].track
+    assert new.track_id != track.track_id
+    assert new.identity == TrackIdentity("ana", 0.7, provisional=True)
+    assert u.resumed == [Resume(track=new, previous_track_id=track.track_id)]
+    # Consumida: otra pista nueva en la misma caja no la hereda otra vez.
+    tracker.observe("cam-a", [], last + 4.0 + TRACK_TTL_S)
+    u2 = tracker.observe("cam-a", [_person(BOX)], last + 20.0)
+    assert u2.matches[0].track.identity is None
+    assert u2.resumed == []
+
+
+def test_new_track_elsewhere_does_not_resume():
+    tracker = Tracker()
+    _, last, _ = _park(tracker)
+    u = tracker.observe("cam-a", [_person((500, 0, 540, 120))], last + 4.0)
+    assert u.matches[0].track.identity is None
+    assert u.resumed == []
+
+
+def test_best_iou_parked_wins():
+    tracker = Tracker()
+    ana_box, luis_box = (0, 0, 100, 200), (20, 0, 120, 200)
+    u = tracker.observe("cam-a", [_person(ana_box), _person(luis_box)], 0.0)
+    for m in u.matches:
+        m.track.identity = TrackIdentity(
+            "ana" if m.detection.bbox == ana_box else "luis", 0.7
+        )
+    for t in range(1, 6):
+        tracker.observe("cam-a", [_person(ana_box), _person(luis_box)], float(t))
+    u = tracker.observe("cam-a", [], 5.0 + TRACK_TTL_S)
+    assert len(u.parked) == 2
+    u = tracker.observe("cam-a", [_person((15, 0, 115, 200))], 10.0)
+    assert u.matches[0].track.identity is not None
+    assert u.matches[0].track.identity.person_id == "luis"
+
+
+def test_parked_identity_expires_after_ttl():
+    tracker = Tracker()
+    _, last, u = _park(tracker)
+    parked = u.parked[0]
+    assert tracker.observe("cam-a", [], last + PARK_TTL_S - 1.0).expired == []
+    u2 = tracker.observe("cam-a", [], last + PARK_TTL_S)
+    assert u2.expired == [parked]
+    assert tracker.observe("cam-a", [], last + PARK_TTL_S + 1.0).expired == []
+
+
+def test_frames_resume_after_long_gap_expire_before_resume():
+    tracker = Tracker()
+    track, last = _still_ana(tracker)
+    u = tracker.observe("cam-a", [_person(BOX)], last + 600.0)
+    assert [t.track_id for t in u.lost] == [track.track_id]
+    assert len(u.parked) == 1
+    assert u.expired == u.parked
+    assert u.matches[0].track.identity is None
+    assert u.resumed == []

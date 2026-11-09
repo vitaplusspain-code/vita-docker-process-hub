@@ -7,11 +7,18 @@ reaparece tras un hueco largo abre pista nueva, no hereda la anterior.
 
 La identidad (FaceIdentifier) viaja aquí, colgada de la pista: se etiqueta
 una vez y acompaña a la persona hasta que la pista se pierde.
+
+Aparcado: una pista identificada que llevaba quieta un rato cuando se pierde
+(p.ej. alguien dormido o inmóvil que el detector deja de ver) no se descarta:
+su identidad se aparca durante PARK_TTL_S. Si una pista nueva aparece en esa
+misma caja, hereda la identidad como provisional (el FaceIdentifier la
+reconfirma). El tracker no sabe nada de inactividad: solo informa de qué se
+aparcó, reanudó o caducó.
 """
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from vitahub.models import Detection
 
@@ -25,12 +32,25 @@ IOU_MATCH = 0.3
 CENTER_MATCH = 1.0
 # Una pista sin observación durante este tiempo se da por perdida.
 TRACK_TTL_S = 3.0
+# Cuánto vive una identidad aparcada esperando que reaparezca en su caja.
+PARK_TTL_S = 120.0
+# Valores iniciales: se calibran con replay_video.py (spec §8).
+# Tiempo mínimo que la pista llevaba quieta al perderse para aparcarla.
+PARK_STILL_S = 4.0
+# IoU contra la caja de referencia que aún cuenta como "el mismo sitio".
+STILL_IOU = 0.7
+# IoU mínimo de una pista nueva con una aparcada para heredarla; más estricto
+# que IOU_MATCH porque aquí no hay continuidad temporal que lo respalde.
+RESUME_IOU = 0.5
 
 
 @dataclass(frozen=True)
 class TrackIdentity:
     person_id: str
     confidence: float
+    # Heredada de una pista aparcada: pendiente de que el FaceIdentifier la
+    # reconfirme con la cara.
+    provisional: bool = False
 
 
 @dataclass
@@ -44,6 +64,10 @@ class Track:
     # Primera coincidencia a la espera de confirmación (regla de 2 frames del
     # FaceIdentifier): un solo frame ruidoso no etiqueta.
     pending_identity: TrackIdentity | None = None
+    # Contabilidad de quietud, privada del tracker: caja de referencia y desde
+    # cuándo la pista no sale de ella.
+    still_bbox: tuple[int, int, int, int] | None = None
+    still_since: float | None = None
 
 
 @dataclass(frozen=True)
@@ -56,9 +80,28 @@ class Match:
 
 
 @dataclass(frozen=True)
+class ParkedIdentity:
+    track_id: int
+    identity: TrackIdentity
+    bbox: tuple[int, int, int, int]
+    # `last_seen` de la pista perdida.
+    parked_at: float
+
+
+@dataclass(frozen=True)
+class Resume:
+    track: Track
+    previous_track_id: int
+
+
+@dataclass(frozen=True)
 class TrackerUpdate:
     matches: list[Match]
     lost: list[Track]
+    # Aparcadas, reanudadas y caducadas en esta llamada.
+    parked: list[ParkedIdentity] = field(default_factory=list)
+    resumed: list[Resume] = field(default_factory=list)
+    expired: list[ParkedIdentity] = field(default_factory=list)
 
 
 def _iou(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
@@ -86,6 +129,7 @@ def _center_distance(
 @dataclass
 class _CameraTracks:
     tracks: list[Track] = field(default_factory=list)
+    parked: list[ParkedIdentity] = field(default_factory=list)
 
 
 class Tracker:
@@ -107,6 +151,27 @@ class Tracker:
         lost = [t for t in cam.tracks if now - t.last_seen >= TRACK_TTL_S]
         cam.tracks = [t for t in cam.tracks if now - t.last_seen < TRACK_TTL_S]
 
+        # Aparcar la identidad de las pistas quietas perdidas, y soltar las
+        # aparcadas que llevan demasiado: caducan ANTES de intentar reanudar.
+        parked: list[ParkedIdentity] = []
+        for t in lost:
+            if (
+                t.identity is not None
+                and t.still_since is not None
+                and t.last_seen - t.still_since >= PARK_STILL_S
+            ):
+                parked.append(
+                    ParkedIdentity(
+                        track_id=t.track_id,
+                        identity=t.identity,
+                        bbox=t.bbox,
+                        parked_at=t.last_seen,
+                    )
+                )
+        cam.parked.extend(parked)
+        expired = [p for p in cam.parked if now - p.parked_at >= PARK_TTL_S]
+        cam.parked = [p for p in cam.parked if now - p.parked_at < PARK_TTL_S]
+
         matches: list[Match] = []
         matched_idx: set[int] = set()
         for track, di in self._match(cam.tracks, persons):
@@ -114,20 +179,46 @@ class Tracker:
             step = max(0.0, now - track.last_seen)
             track.bbox = det.bbox
             track.last_seen = now
+            if (
+                track.still_bbox is None
+                or _iou(track.still_bbox, det.bbox) < STILL_IOU
+            ):
+                track.still_bbox = det.bbox
+                track.still_since = now
             matches.append(Match(track=track, detection=det, step_s=step))
             matched_idx.add(di)
 
         # Dedup por índice, no por id(det): dos detecciones idénticas
         # (mismo objeto Detection, p.ej. duplicado por el detector) deben
         # abrir dos pistas, no una — id() las confundiría en una sola.
+        resumed: list[Resume] = []
         for di, det in enumerate(persons):
             if di in matched_idx:
                 continue
-            track = Track(track_id=self._next_id, bbox=det.bbox, last_seen=now)
+            track = Track(
+                track_id=self._next_id,
+                bbox=det.bbox,
+                last_seen=now,
+                still_bbox=det.bbox,
+                still_since=now,
+            )
             self._next_id += 1
+            best = max(
+                cam.parked, key=lambda p: _iou(p.bbox, det.bbox), default=None
+            )
+            if best is not None and _iou(best.bbox, det.bbox) >= RESUME_IOU:
+                track.identity = replace(best.identity, provisional=True)
+                cam.parked.remove(best)
+                resumed.append(Resume(track=track, previous_track_id=best.track_id))
             cam.tracks.append(track)
             matches.append(Match(track=track, detection=det, step_s=0.0))
-        return TrackerUpdate(matches=matches, lost=lost)
+        return TrackerUpdate(
+            matches=matches,
+            lost=lost,
+            parked=parked,
+            resumed=resumed,
+            expired=expired,
+        )
 
     def _match(
         self, tracks: list[Track], persons: list[Detection]
