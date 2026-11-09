@@ -108,10 +108,29 @@ class InactivityEngine:
         cam = self._cameras.setdefault(camera.id, _CameraState())
         events: list[Event] = []
 
-        # Las pistas perdidas, aparcadas, reanudadas y caducadas son cosa de la
-        # oclusión (tarea 5); aquí solo se libera el estado de las perdidas.
+        # Ocultaciones, antes que las coincidencias y en este orden: con un hueco
+        # largo entre frames una misma pista puede venir en expired, parked y
+        # lost a la vez, y el primero que la cierra evita el doble fin.
+        for parked in update.expired:
+            ep = cam.episodes.pop(parked.track_id, None)
+            if ep is not None and ep.emitted:
+                events.append(self._ended(camera, ep, parked.parked_at, now, "track_lost"))
+
+        parked_ids = {p.track_id for p in update.parked}
         for track in update.lost:
-            cam.episodes.pop(track.track_id, None)
+            if track.track_id in parked_ids:
+                # Aparcada: el episodio sigue vivo con `last_inside` congelado;
+                # la reanudación o la caducidad lo resuelven.
+                continue
+            ep = cam.episodes.pop(track.track_id, None)
+            if ep is not None and ep.emitted:
+                events.append(self._ended(camera, ep, track.last_seen, now, "track_lost"))
+
+        for resume in update.resumed:
+            ep = cam.episodes.pop(resume.previous_track_id, None)
+            if ep is not None:
+                # El tiempo oculto cuenta: mismo ancla, inicio y episode_id.
+                cam.episodes[resume.track.track_id] = ep
 
         for match in update.matches:
             track = match.track

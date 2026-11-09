@@ -267,3 +267,90 @@ def test_new_candidate_after_move_uses_current_box_scale():
     # candidato nuevo en 12; la caja pequeña da radio 75, así que el
     # desplazamiento de 100 lo reinicia en 16 (con escala 600 no habría reinicio)
     assert events[0].payload["started_at"] == _wall(16)
+
+
+# --- ocultaciones: aparcado, reanudación y caducidad -------------------------
+
+
+def _hidden(from_s, to_s):
+    """Frames sin detecciones a 2 fps."""
+    n = int((to_s - from_s) * 2)
+    return [(from_s + i * 0.5, []) for i in range(n + 1)]
+
+
+def test_four_second_occlusion_keeps_episode():
+    engine, tracker, clock = _setup()
+    frames = _still(SIT, 0, 360) + _hidden(360.5, 364) + _still(SIT, 364.5, 370)
+    labelled = []
+
+    def ident(det):
+        labelled.append(det)
+        return ANA
+
+    events = _run(engine, tracker, clock, frames, ident=ident)
+    assert [e.type for e in events] == ["inactivity_started"]
+    # la pista reanudada hereda a "ana": nadie la etiqueta de nuevo
+    assert len(labelled) == 1
+    episode_id = events[0].payload["episode_id"]
+    # se aleja a 30 px por frame (el IoU enlaza la pista); sale del radio 100 al 4.º
+    away = [
+        (370.5 + i * 0.5, [_det((100 + 30 * (i + 1), 200, 200 + 30 * (i + 1), 400))])
+        for i in range(8)
+    ]
+    events = _run(engine, tracker, clock, away)
+    assert [e.type for e in events] == ["inactivity_ended"]
+    ended = events[0].payload
+    assert ended["episode_id"] == episode_id
+    assert ended["reason"] == "moved"
+    # empieza en 0 y la última vez dentro del radio fue 371.5: incluye los 4 s ocultos
+    assert ended["duration_s"] == 371.5
+
+
+def test_occlusion_before_threshold_keeps_counting():
+    engine, tracker, clock = _setup()
+    frames = _still(SIT, 0, 180) + _hidden(180.5, 190) + _still(SIT, 190.5, 310)
+    events = _run(engine, tracker, clock, frames)
+    assert [e.type for e in events] == ["inactivity_started"]
+    assert events[0].payload["started_at"] == _wall(0)
+
+
+def test_parked_expiry_ends_with_track_lost():
+    from vitahub.analytics.tracker import PARK_TTL_S
+
+    engine, tracker, clock = _setup()
+    frames = _still(SIT, 0, 400) + _hidden(400.5, 400 + PARK_TTL_S + 5)
+    events = _run(engine, tracker, clock, frames)
+    assert [e.type for e in events] == ["inactivity_started", "inactivity_ended"]
+    ended = events[1].payload
+    assert ended["reason"] == "track_lost"
+    assert ended["ended_at"] == _wall(400)
+    assert ended["duration_s"] == 400.0
+
+
+def test_long_frame_gap_ends_with_last_seen():
+    engine, tracker, clock = _setup()
+    frames = _still(SIT, 0, 400) + [(1000.0, [_det(SIT)])]
+    events = _run(engine, tracker, clock, frames)
+    assert [e.type for e in events] == ["inactivity_started", "inactivity_ended"]
+    ended = events[1].payload
+    assert ended["reason"] == "track_lost"
+    assert ended["ended_at"] == _wall(400)
+    # la pista nueva empieza un candidato silencioso propio
+    more = _run(engine, tracker, clock, [(1000.5 + i * 0.5, [_det(SIT)]) for i in range(20)])
+    assert more == []
+
+
+def test_moving_track_lost_ends_immediately():
+    engine, tracker, clock = _setup(min_minutes=1.0)
+    frames = _still(SIT, 0, 70)
+    # se mueve 10 px por frame (80 px < radio 100): sigue dentro del radio pero
+    # la pista no llega a estar quieta 4 s, así que no se aparca al perderse
+    frames += [(70.5 + i * 0.5, [_det((100 + 10 * (i + 1), 200, 200 + 10 * (i + 1), 400))]) for i in range(8)]
+    events = _run(engine, tracker, clock, frames)
+    assert [e.type for e in events] == ["inactivity_started"]
+    # la pista se pierde a los 3 s (TRACK_TTL_S): el fin llega en el update de lost
+    events = _run(engine, tracker, clock, _hidden(74.5, 78))
+    assert [e.type for e in events] == ["inactivity_ended"]
+    ended = events[0].payload
+    assert ended["reason"] == "track_lost"
+    assert ended["ended_at"] == _wall(74)
