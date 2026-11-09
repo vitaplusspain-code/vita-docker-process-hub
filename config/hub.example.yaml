@@ -10,8 +10,12 @@ inference:
     enabled: false          # true para emitir fall_detected/update/resolved (requiere detector: person_pose)
     min_score: 0.3          # score mínimo para emitir; bajo a propósito, quien filtra es AWS
   identity:
-    enabled: false          # true para etiquetar los fall_* con la persona (requiere fall.enabled)
+    enabled: false          # true para etiquetar caídas/inactividad con la persona (requiere fall.enabled o inactivity.enabled)
     match_threshold: 0.4    # similitud mínima contra /data/faces/<person_id>/ para etiquetar
+  inactivity:
+    enabled: false          # true para avisar de la inactividad de la persona objetivo por cámara
+                            # (requiere identity.enabled; no exige detector: person_pose)
+    min_minutes: 5.0        # minutos sin movimiento antes de emitir
 uplink:
   enabled: false            # true para publicar los eventos en AWS IoT Core
   topic_prefix: vita/hub    # NO lo cambies por hogar: la policy de IoT lo lleva fijo,

@@ -49,6 +49,13 @@ class IdentityConfig:
 
 
 @dataclass
+class InactivityConfig:
+    enabled: bool = False
+    # Minutos sin movimiento de la persona objetivo antes de emitir inactividad.
+    min_minutes: float = 5.0
+
+
+@dataclass
 class InferenceConfig:
     detector: str = "person_yolo"
     sample_fps: float = 2.0
@@ -56,6 +63,7 @@ class InferenceConfig:
     stream: str = "substream"
     fall: FallConfig = field(default_factory=FallConfig)
     identity: IdentityConfig = field(default_factory=IdentityConfig)
+    inactivity: InactivityConfig = field(default_factory=InactivityConfig)
 
 
 @dataclass
@@ -426,7 +434,24 @@ def _fall_from_raw(raw: object, detector: str) -> FallConfig:
     return FallConfig(enabled=enabled, min_score=min_score)
 
 
-def _identity_from_raw(raw: object, fall: FallConfig) -> IdentityConfig:
+def _inactivity_from_raw(raw: object) -> InactivityConfig:
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ConfigError("Sección 'inference.inactivity' debe ser un mapping YAML")
+    enabled = bool(raw.get("enabled", False))
+    try:
+        min_minutes = float(raw.get("min_minutes", 5.0))
+    except (ValueError, TypeError) as exc:
+        raise ConfigError("Campo 'inference.inactivity.min_minutes' no es numérico") from exc
+    if not min_minutes > 0:
+        raise ConfigError("Campo 'inference.inactivity.min_minutes' debe ser mayor que 0")
+    return InactivityConfig(enabled=enabled, min_minutes=min_minutes)
+
+
+def _identity_from_raw(
+    raw: object, fall: FallConfig, inactivity: InactivityConfig
+) -> IdentityConfig:
     if raw is None:
         raw = {}
     if not isinstance(raw, dict):
@@ -443,12 +468,13 @@ def _identity_from_raw(raw: object, fall: FallConfig) -> IdentityConfig:
             "Campo 'inference.identity.match_threshold' debe estar entre 0 "
             "(excl.) y 1"
         )
-    if enabled and not fall.enabled:
-        # En v1 la identidad solo etiqueta eventos fall_*: sin caídas activas
+    if enabled and not (fall.enabled or inactivity.enabled):
+        # La identidad solo etiqueta caídas o inactividad: sin ninguna activa
         # no tiene ningún efecto y encenderla es un error de instalación.
         raise ConfigError(
             "inference.identity.enabled requiere 'inference.fall.enabled: true' "
-            "(en esta versión la identidad solo etiqueta eventos de caída)"
+            "o 'inference.inactivity.enabled: true' (la identidad solo etiqueta "
+            "caídas o inactividad)"
         )
     return IdentityConfig(enabled=enabled, match_threshold=match_threshold)
 
@@ -519,6 +545,13 @@ def load_config(path: Path, env: Mapping[str, str]) -> HubConfig:
 
     detector = str(inf_raw.get("detector", "person_yolo"))
     fall = _fall_from_raw(inf_raw.get("fall"), detector)
+    inactivity = _inactivity_from_raw(inf_raw.get("inactivity"))
+    identity = _identity_from_raw(inf_raw.get("identity"), fall, inactivity)
+    if inactivity.enabled and not identity.enabled:
+        raise ConfigError(
+            "inference.inactivity.enabled requiere 'inference.identity.enabled: true' "
+            "(sin identidad no hay persona objetivo)"
+        )
     uplink = _uplink_from_raw(up_raw, env)
     return HubConfig(
         hub_id=hub_id,
@@ -529,7 +562,8 @@ def load_config(path: Path, env: Mapping[str, str]) -> HubConfig:
             confidence=confidence,
             stream=stream,
             fall=fall,
-            identity=_identity_from_raw(inf_raw.get("identity"), fall),
+            identity=identity,
+            inactivity=inactivity,
         ),
         cameras=_cameras_from_raw(raw.get("cameras") or []),
         credentials=credentials,

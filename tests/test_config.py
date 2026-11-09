@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from vitahub.config import ConfigError, load_config, save_cameras
+from vitahub.config import ConfigError, InactivityConfig, load_config, save_cameras
 
 VALID_YAML = """
 hub_id: hub-3f9a
@@ -673,3 +673,50 @@ def test_gallery_key():
 
     assert gallery_key("hub-1", "manifest.json") == "hubs/hub-1/faces/manifest.json"
     assert gallery_key("hub-1") == "hubs/hub-1/faces/"
+
+
+def test_inactivity_defaults_off(tmp_path):
+    cfg = load_config(_write(tmp_path, "hub_id: hub-1\n"), ENV)
+    assert cfg.inference.inactivity == InactivityConfig(enabled=False, min_minutes=5.0)
+
+
+def test_inactivity_with_identity_and_person_yolo_loads(tmp_path):
+    path = _write(
+        tmp_path,
+        "hub_id: hub-1\ninference:\n  detector: person_yolo\n  fall:\n    enabled: false\n"
+        "  identity:\n    enabled: true\n  inactivity:\n    enabled: true\n    min_minutes: 5\n",
+    )
+    cfg = load_config(path, ENV)
+    assert cfg.inference.identity.enabled is True
+    assert cfg.inference.inactivity == InactivityConfig(enabled=True, min_minutes=5.0)
+
+
+def test_inactivity_requires_identity(tmp_path):
+    path = _write(
+        tmp_path,
+        "hub_id: hub-1\ninference:\n  inactivity:\n    enabled: true\n",
+    )
+    with pytest.raises(
+        ConfigError,
+        match="inference.inactivity.enabled requiere 'inference.identity.enabled: true'",
+    ):
+        load_config(path, ENV)
+
+
+def test_identity_requires_fall_or_inactivity(tmp_path):
+    path = _write(
+        tmp_path,
+        "hub_id: hub-1\ninference:\n  identity:\n    enabled: true\n",
+    )
+    with pytest.raises(ConfigError, match="caídas o inactividad"):
+        load_config(path, ENV)
+
+
+@pytest.mark.parametrize("value", ["0", '"x"'])
+def test_inactivity_min_minutes_must_be_positive(tmp_path, value):
+    path = _write(
+        tmp_path,
+        f"hub_id: hub-1\ninference:\n  inactivity:\n    min_minutes: {value}\n",
+    )
+    with pytest.raises(ConfigError, match="min_minutes"):
+        load_config(path, ENV)
