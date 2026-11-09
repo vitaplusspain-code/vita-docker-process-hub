@@ -1,0 +1,189 @@
+from datetime import UTC, datetime, timedelta
+
+from vitahub.analytics.inactivity_engine import (
+    ANKLE_MIN_CONF,
+    L_ANKLE,
+    R_ANKLE,
+    InactivityEngine,
+    feet_point,
+)
+from vitahub.analytics.tracker import Tracker, TrackIdentity
+from vitahub.models import Camera, Detection
+
+CAM = Camera(id="cam1", name="salon", last_ip="10.0.0.5")
+T0 = datetime(2026, 8, 22, 10, 0, 0, tzinfo=UTC)
+SIT = (100, 200, 200, 400)
+ANA = TrackIdentity("ana", 0.7)
+
+
+class _Clock:
+    def __init__(self):
+        self.t = T0
+
+    def __call__(self):
+        return self.t
+
+
+def _wall(t):
+    return (T0 + timedelta(seconds=t)).isoformat()
+
+
+def _det(bbox, keypoints=None):
+    return Detection("person", 0.9, bbox, keypoints)
+
+
+def _setup(min_minutes=5.0):
+    clock = _Clock()
+    return InactivityEngine("hub-1", min_minutes=min_minutes, clock=clock), Tracker(), clock
+
+
+def _run(engine, tracker, clock, frames, ident=lambda det: ANA):
+    """frames: (now, detecciones) a 2 fps. Etiqueta las pistas nuevas con
+    `ident(det)` antes de pasarlas al motor; el reloj sigue a `now`."""
+    events = []
+    for now, dets in frames:
+        clock.t = T0 + timedelta(seconds=now)
+        update = tracker.observe(CAM.id, dets, now)
+        for m in update.matches:
+            if m.track.identity is None:
+                m.track.identity = ident(m.detection)
+        events += engine.observe(CAM, update, now)
+    return events
+
+
+def _still(box, from_s, to_s):
+    n = int((to_s - from_s) * 2)
+    return [(from_s + i * 0.5, [_det(box)]) for i in range(n + 1)]
+
+
+def _kps(ankles):
+    kps = [(0.0, 0.0, 0.0)] * 17
+    kps[L_ANKLE] = ankles[0]
+    kps[R_ANKLE] = ankles[1]
+    return tuple(kps)
+
+
+def _ankles_at(x, bbox=SIT):
+    """Misma caja, tobillos en x: mueve el punto de pies sin cambiar de pista."""
+    return _det(bbox, _kps(((x - 10.0, 400.0, 0.9), (x + 10.0, 400.0, 0.9))))
+
+
+def test_feet_point_uses_ankles_when_confident_else_box_bottom():
+    good = ANKLE_MIN_CONF + 0.1
+    bad = ANKLE_MIN_CONF - 0.1
+    box = (100, 0, 200, 400)
+    assert feet_point(_det(box, _kps(((120.0, 390.0, good), (140.0, 380.0, good))))) == (130.0, 385.0)
+    # un tobillo dudoso: se cae a la base de la caja
+    assert feet_point(_det(box, _kps(((120.0, 390.0, good), (140.0, 380.0, bad))))) == (150.0, 400)
+    assert feet_point(_det(box)) == (150.0, 400)
+
+
+def test_short_episode_emits_nothing():
+    engine, tracker, clock = _setup()
+    frames = _still(SIT, 0, 290) + _still((700, 200, 800, 400), 290.5, 300)
+    assert _run(engine, tracker, clock, frames) == []
+
+
+def test_started_at_min_minutes_with_real_start():
+    engine, tracker, clock = _setup()
+    events = _run(engine, tracker, clock, _still(SIT, 0, 400))
+    assert [e.type for e in events] == ["inactivity_started"]
+    e = events[0]
+    assert e.severity == "info"
+    assert e.camera_id == "cam1"
+    assert e.payload["started_at"] == _wall(0)
+    assert e.payload["still_s"] == 300.0
+    assert e.payload["person"] == {"id": "ana", "confidence": 0.7}
+    assert e.payload["episode_id"].startswith("cam1-")
+    assert e.timestamp == _wall(300)
+
+
+def test_standing_up_in_place_does_not_end():
+    engine, tracker, clock = _setup()
+    standing = (110, 0, 190, 400)
+    frames = _still(SIT, 0, 360) + _still(standing, 360.5, 420)
+    events = _run(engine, tracker, clock, frames)
+    assert [e.type for e in events] == ["inactivity_started"]
+
+
+def test_one_frame_jitter_does_not_end():
+    engine, tracker, clock = _setup()
+    # un único frame con los pies 300 px fuera (misma pista), luego vuelve
+    frames = [(i * 0.5, [_ankles_at(150)]) for i in range(721)]
+    frames[720] = (360.0, [_ankles_at(450)])
+    frames += [(360.5 + i * 0.5, [_ankles_at(150)]) for i in range(60)]
+    events = _run(engine, tracker, clock, frames)
+    assert [e.type for e in events] == ["inactivity_started"]
+
+
+def test_confirmed_move_ends_with_moved_and_last_inside_time():
+    engine, tracker, clock = _setup()
+    frames = [(i * 0.5, [_ankles_at(150)]) for i in range(720)]  # hasta 359.5
+    frames += [(360 + i * 0.5, [_ankles_at(450)]) for i in range(10)]
+    events = _run(engine, tracker, clock, frames)
+    assert [e.type for e in events] == ["inactivity_started", "inactivity_ended"]
+    start, end = events
+    assert end.severity == "info"
+    assert end.payload["reason"] == "moved"
+    assert end.payload["ended_at"] == _wall(359.5)
+    assert end.payload["duration_s"] == 359.5
+    assert end.payload["started_at"] == _wall(0)
+    assert end.payload["episode_id"] == start.payload["episode_id"]
+    assert end.payload["person"] == {"id": "ana", "confidence": 0.7}
+    # tras el fin arranca un candidato nuevo en la posición nueva: no re-emite
+    assert _run(engine, tracker, clock, _still(SIT, 365, 400)) == []
+
+
+def test_identity_changed_ends_episode():
+    engine, tracker, clock = _setup()
+    events = _run(engine, tracker, clock, _still(SIT, 0, 310))
+    assert [e.type for e in events] == ["inactivity_started"]
+    tracker._cameras[CAM.id].tracks[0].identity = TrackIdentity("luis", 0.5)
+    more = _run(engine, tracker, clock, _still(SIT, 310.5, 500))
+    assert [e.type for e in more] == ["inactivity_ended"]
+    end = more[0]
+    assert end.payload["reason"] == "identity_changed"
+    assert end.payload["person"] == {"id": "ana", "confidence": 0.7}
+    assert end.payload["ended_at"] == _wall(310.5)
+    assert end.payload["duration_s"] == 310.5
+    # el episodio de luis arrancó en 310.5 y aún no llega a 5 min
+    assert _run(engine, tracker, clock, _still(SIT, 501, 609)) == []
+    late = _run(engine, tracker, clock, _still(SIT, 609.5, 611))
+    assert [e.type for e in late] == ["inactivity_started"]
+    assert late[0].payload["person"] == {"id": "luis", "confidence": 0.5}
+    assert late[0].payload["started_at"] == _wall(310.5)
+    assert late[0].payload["episode_id"] != events[0].payload["episode_id"]
+
+
+def test_two_people_independent_episodes():
+    engine, tracker, clock = _setup()
+    a, b = (100, 200, 200, 400), (600, 200, 700, 400)
+
+    def ident(det):
+        return TrackIdentity("ana", 0.7) if det.bbox[0] < 300 else TrackIdentity("luis", 0.6)
+
+    both = [_det(a), _det(b)]
+    frames = [(i * 0.5, both) for i in range(720)]
+    events = _run(engine, tracker, clock, frames, ident)
+    assert sorted(e.payload["person"]["id"] for e in events) == ["ana", "luis"]
+    assert len({e.payload["episode_id"] for e in events}) == 2
+    # ana camina, luis sigue quieto: solo termina el episodio de ana
+    walk = []
+    for i in range(20):
+        x = 100 + 40 * (i + 1)
+        walk.append((360 + i * 0.5, [_det((x, 200, x + 100, 400)), _det(b)]))
+    events = _run(engine, tracker, clock, walk, ident)
+    assert [e.type for e in events] == ["inactivity_ended"]
+    assert events[0].payload["person"]["id"] == "ana"
+
+
+def test_anonymous_track_never_emits():
+    engine, tracker, clock = _setup()
+    assert _run(engine, tracker, clock, _still(SIT, 0, 600), ident=lambda d: None) == []
+
+
+def test_person_yolo_boxes_without_keypoints():
+    engine, tracker, clock = _setup()
+    frames = [(i * 0.5, [Detection("person", 0.8, SIT, keypoints=None)]) for i in range(700)]
+    events = _run(engine, tracker, clock, frames)
+    assert [e.type for e in events] == ["inactivity_started"]
