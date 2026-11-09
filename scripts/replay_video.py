@@ -19,6 +19,7 @@ import cv2
 
 from vitahub.analytics.event_engine import EventEngine
 from vitahub.analytics.fall_engine import FallEngine
+from vitahub.analytics.inactivity_engine import InactivityEngine
 from vitahub.analytics.tracker import Tracker
 from vitahub.config import InferenceConfig
 from vitahub.factory import build_detector
@@ -30,7 +31,7 @@ from vitahub.worker import process_frame
 
 
 class _FilteredSink(EventSink):
-    """Deja pasar solo los eventos de caída salvo que se pidan también los de presencia."""
+    """Deja pasar solo los eventos de caída e inactividad salvo que se pidan también los de presencia."""
 
     def __init__(self, inner: EventSink, presence: bool) -> None:
         self._inner = inner
@@ -39,7 +40,7 @@ class _FilteredSink(EventSink):
 
     def emit(self, event: Event) -> None:
         self.events.append(event)
-        if self._presence or event.type.startswith("fall_"):
+        if self._presence or event.type.startswith(("fall_", "inactivity_")):
             self._inner.emit(event)
 
     def close(self) -> None:
@@ -67,6 +68,7 @@ def replay(
     presence: bool,
     faces: str,
     match_threshold: float,
+    inactivity_min: float = 5.0,
 ) -> dict[str, object]:
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
@@ -76,6 +78,7 @@ def replay(
     engine = EventEngine("replay")
     fall = FallEngine("replay", min_score=min_score)
     tracker = Tracker()
+    inactivity = None
     identifier = None
     if faces:
         from vitahub.identity.face_id import FaceIdentifier
@@ -88,6 +91,8 @@ def replay(
         identifier = FaceIdentifier(
             engine_face, load_gallery(Path(faces), engine_face), match_threshold
         )
+        # La inactividad por persona identificada solo tiene sentido con caras.
+        inactivity = InactivityEngine("replay", min_minutes=inactivity_min)
     sink = _FilteredSink(StdoutJsonSink(), presence)
     camera = Camera(id="video", name=path, last_ip="")
     frames = 0
@@ -113,6 +118,7 @@ def replay(
                     fall_engine=fall,
                     tracker=tracker,
                     identifier=identifier,
+                    inactivity_engine=inactivity,
                 )
     finally:
         cap.release()
@@ -129,6 +135,12 @@ def main() -> int:
     parser.add_argument("--presence", action="store_true", help="imprime también person_*")
     parser.add_argument("--faces", default="", help="carpeta de enrolados (activa identidad)")
     parser.add_argument("--match-threshold", type=float, default=0.4)
+    parser.add_argument(
+        "--inactivity-min",
+        type=float,
+        default=5.0,
+        help="minutos de quietud para abrir un episodio (bajo para clips cortos)",
+    )
     args = parser.parse_args()
     summary = replay(
         args.video,
@@ -138,6 +150,7 @@ def main() -> int:
         args.presence,
         args.faces,
         args.match_threshold,
+        args.inactivity_min,
     )
     print(json.dumps(summary, ensure_ascii=False), file=sys.stderr)
     return 0

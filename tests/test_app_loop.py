@@ -162,3 +162,32 @@ def test_shutdown_without_live():
     sink = MagicMock()
     _shutdown(None, None, MagicMock(), sink)
     sink.close.assert_called_once()
+
+
+def _analytics_cfg(fall: bool, inactivity: bool):
+    from vitahub.config import FallConfig, InactivityConfig, InferenceConfig
+
+    return MagicMock(
+        hub_id="hub-1",
+        inference=InferenceConfig(
+            fall=FallConfig(enabled=fall),
+            inactivity=InactivityConfig(enabled=inactivity, min_minutes=7.0),
+        ),
+    )
+
+
+def test_build_analytics_inactivity_only_creates_tracker_and_engine():
+    from vitahub.analytics.inactivity_engine import InactivityEngine
+    from vitahub.analytics.tracker import Tracker
+    from vitahub.app import _build_analytics
+
+    fall, inactivity, tracker = _build_analytics(_analytics_cfg(fall=False, inactivity=True))
+    assert fall is None
+    assert isinstance(inactivity, InactivityEngine)
+    assert isinstance(tracker, Tracker)
+
+
+def test_build_analytics_both_off_has_no_tracker():
+    from vitahub.app import _build_analytics
+
+    assert _build_analytics(_analytics_cfg(fall=False, inactivity=False)) == (None, None, None)

@@ -123,6 +123,14 @@ Pon `detector: person_pose` y `fall.enabled: true` (dentro de `inference:`) en `
 eventos `fall_detected`/`fall_update`/`fall_resolved`, con `score` y `signals`, por stdout y por AWS
 (si el uplink está encendido). El hub no avisa a nadie: eso lo hará un sistema en AWS.
 
+## Inactividad de la persona objetivo (opcional)
+
+Pon `inference.inactivity.enabled: true` (y `min_minutes`, por defecto 5.0) en `hub.yaml`. Requiere
+`detector: person_pose` y la identidad activa (`inference.identity`): solo se sigue a una persona
+identificada. Salen `inactivity_started`/`inactivity_ended` por stdout y por AWS. Para comprobarlo
+con un vídeo: `python scripts/replay_video.py <video> --faces <carpeta> --inactivity-min 0.5`.
+No requiere `fall.enabled`.
+
 ## Despliegue en Jetson Orin (GPU)
 
 ```bash

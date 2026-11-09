@@ -178,3 +178,72 @@ def test_identified_track_labels_fall_detected_person():
     assert len(fall_events) == 1
     assert fall_events[0].payload["person"] == {"id": "maria", "confidence": 1.0}
     assert face_engine.calls == 2
+
+
+class _SpyInactivity:
+    """Doble del motor de inactividad: cuenta llamadas y emite un evento fijo."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def observe(self, camera, update, now):
+        self.calls += 1
+        return [Event("hub-1", camera.id, camera.name, "inactivity_started", "high", "t", {})]
+
+
+def test_inactivity_runs_without_fall_engine():
+    engine = EventEngine(hub_id="hub-1", present_after_s=2.0, absent_after_s=5.0)
+    spy = _SpyInactivity()
+    tracker = Tracker()
+    sink = _RecordingSink()
+    detector = StubDetector(person_count=1, bbox=LYING_BOX)
+    for i in range(3):
+        process_frame(
+            CAM, None, detector, engine, sink, now=float(i),
+            fall_engine=None, tracker=tracker, inactivity_engine=spy,
+        )
+    assert spy.calls == 3
+    assert [e.type for e in sink.events].count("inactivity_started") == 3
+
+
+def test_inactivity_exception_does_not_break_presence_or_falls(caplog, monkeypatch):
+    class _Boom:
+        def observe(self, camera, update, now):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(worker_module, "_inactivity_failure_logged", set())
+    engine = EventEngine(hub_id="hub-1", present_after_s=2.0, absent_after_s=5.0)
+    fall = FallEngine(hub_id="hub-1", min_score=0.3)
+    tracker = Tracker()
+    sink = _RecordingSink()
+    detector = StubDetector(person_count=1, keypoints=LYING_KPS, bbox=LYING_BOX)
+    all_events = []
+    now = 0.0
+    for _ in range(8):
+        all_events += process_frame(
+            CAM, None, detector, engine, sink, now=now,
+            fall_engine=fall, tracker=tracker, inactivity_engine=_Boom(),
+        )
+        now += 0.5
+    types = [e.type for e in all_events]
+    assert "person_detected" in types
+    assert "fall_detected" in types
+    assert sum("analítica de inactividad" in r.message for r in caplog.records) == 1
+
+
+def test_fall_exception_does_not_skip_inactivity(monkeypatch):
+    class _Boom:
+        def observe(self, camera, update, now):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(worker_module, "_fall_failure_logged", set())
+    engine = EventEngine(hub_id="hub-1", present_after_s=2.0, absent_after_s=5.0)
+    spy = _SpyInactivity()
+    sink = _RecordingSink()
+    detector = StubDetector(person_count=1, bbox=LYING_BOX)
+    process_frame(
+        CAM, None, detector, engine, sink, now=0.0,
+        fall_engine=_Boom(), tracker=Tracker(), inactivity_engine=spy,
+    )
+    assert spy.calls == 1
+    assert [e.type for e in sink.events] == ["inactivity_started"]

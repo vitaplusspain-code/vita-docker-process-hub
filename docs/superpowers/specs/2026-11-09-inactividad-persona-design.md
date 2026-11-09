@@ -270,7 +270,8 @@ error se mantiene. Queda documentado como límite conocido.
 ### 6.2 Regla `camera_inactivity`
 
 Se añade a `RuleId` y a `RULES`. El estado va en `PersonState.cameraInactivity`, indexado por
-`episode_id`, porque puede haber episodios en dos cámaras a la vez.
+`cameraId` (un episodio objetivo por cámara, no por `episode_id`), porque puede haber episodios en dos
+cámaras a la vez.
 
 - **`inactivity_started`.** Guarda el episodio: `startedAt`, `cameraName`, `cameraId` y
   `lastEventAt`. No abre alerta.
@@ -318,6 +319,12 @@ el silencio del hub como señal, como hace `fallOrphanMin`. Hay dos salidas:
   `episode_id` por el nuevo, para que el `ended` futuro case. *(Decisión del asistente.)*
   Riesgo aceptado: si se perdió un `ended` real y la persona volvió a quedarse quieta en esa
   cámara, el episodio se ve más largo de lo que fue. Lo acota `cameraInactivityMaxMin`.
+- **Reinicios del hub, explícitos.** El rule engine también los trata de forma expresa: ante un
+  `camera_reachable` con `initial: true` de una cámara con episodio abierto, espera
+  `cameraInactivityRestartGraceMin` (por defecto 30) a que llegue un `inactivity_started` nuevo.
+  Si no llega, el episodio sale del estado y, si había una alerta retenida, se libera con
+  `closedBy: 'hub_restart'`. Contrapartida: una persona quieta cuya cara no se reidentifica en
+  esos 30 min ve la alerta cerrada, y la cuenta se reinicia desde el nuevo `started_at`.
 
 ### 6.4 Informe diario (fuera de este slice)
 

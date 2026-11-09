@@ -61,6 +61,8 @@ Fuera, con motivo:
 
 ## 3. Arquitectura y encaje
 
+> **Nota (actualizada):** el §3 describe el diseño original. El código vigente está en `src/vitahub/identity/` y `worker.process_frame`: el identificador trabaja sobre el fotograma completo y con cadencia por cámara, y las pistas etiquetadas alimentan tanto `FallEngine` como `InactivityEngine` (spec de inactividad enlazada arriba). Ante discrepancias manda el código.
+
 Se extrae el tracking de `FallEngine` y la identidad se monta sobre las pistas:
 
 ```
@@ -91,7 +93,7 @@ frame ─► PosePersonDetector ─► [Detection] ─► Tracker ─► [(Track
 | `analytics/fall_engine.py` | Deja de emparejar: `observe()` recibe los pares `(Track, Detection)` y las pistas perdidas del `Tracker`. El estado de episodio (`upright/candidate/reported`, señales, score) se queda como está, colgado de la pista. Los `fall_*` incluyen `person` desde la identidad de la pista. |
 | `worker.process_frame` | Orquesta: detect → track → (si identidad activa) identify → fall/presencia. El identificador va en `try` propio con log una-vez-por-cámara, mismo patrón que la analítica de caídas: la identidad nunca tumba la detección. |
 | `factory.py` | Construye `Tracker` (siempre que haya `fall_engine`) y `FaceIdentifier` + galería si `identity.enabled`. |
-| `config.load_config` | Parsea `inference.identity`. `enabled: true` sin pesos, con `/data/faces/` inexistente, o con `inference.fall.enabled: false` → `ConfigError` legible (fail-fast: es un error de instalación y el técnico está delante). En v1 la identidad solo etiqueta eventos `fall_*`, así que sin caídas activas no tiene efecto y encenderla sería un error de configuración. |
+| `config.load_config` | Parsea `inference.identity`. `enabled: true` sin pesos, con `/data/faces/` inexistente, o con `inference.fall.enabled: false` → `ConfigError` legible (fail-fast: es un error de instalación y el técnico está delante). La identidad etiqueta eventos `fall_*` y también `inactivity_*` (ver [inactividad por persona](2026-11-09-inactividad-persona-design.md)); sin ninguna de las dos analíticas activas no tiene efecto y encenderla sería un error de configuración. Por eso exige `inference.fall.enabled` o `inference.inactivity.enabled`. |
 | `scripts/replay_video.py` | Acepta la galería para calibrar `match_threshold` con vídeos reales, como se calibró el score de caídas. |
 
 ## 4. Comportamiento de la identidad

@@ -11,6 +11,7 @@ from pathlib import Path
 from vitahub.analytics.connection_monitor import ConnectionMonitor
 from vitahub.analytics.event_engine import EventEngine
 from vitahub.analytics.fall_engine import FallEngine
+from vitahub.analytics.inactivity_engine import InactivityEngine
 from vitahub.analytics.tracker import Tracker
 from vitahub.clips.recorder import record
 from vitahub.config import ConfigError, HubConfig, load_config
@@ -62,6 +63,34 @@ _LIVE_SHUTDOWN_DEADLINE_S = 5.0
 _CLIPS_SHUTDOWN_DEADLINE_S = 5.0
 
 
+def _build_analytics(
+    cfg: HubConfig,
+) -> tuple[FallEngine | None, InactivityEngine | None, Tracker | None]:
+    """Crea los motores de analítica activos y el tracker que comparten.
+
+    El tracker solo existe si algún motor lo necesita.
+    """
+    fall_engine = (
+        FallEngine(cfg.hub_id, min_score=cfg.inference.fall.min_score)
+        if cfg.inference.fall.enabled
+        else None
+    )
+    if fall_engine is not None:
+        _log.info("analítica de caídas activada (min_score=%.2f)", cfg.inference.fall.min_score)
+    inactivity_engine = (
+        InactivityEngine(cfg.hub_id, min_minutes=cfg.inference.inactivity.min_minutes)
+        if cfg.inference.inactivity.enabled
+        else None
+    )
+    if inactivity_engine is not None:
+        _log.info(
+            "analítica de inactividad activada (min_minutes=%.1f)",
+            cfg.inference.inactivity.min_minutes,
+        )
+    tracker = Tracker() if fall_engine is not None or inactivity_engine is not None else None
+    return fall_engine, inactivity_engine, tracker
+
+
 def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
     cfg = load_config(config_path, env)
     register_secret(cfg.credentials.onvif_password)
@@ -87,14 +116,7 @@ def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
         weights_path = env.get("VITAHUB_POSE_WEIGHTS", _DEFAULT_POSE_WEIGHTS)
     detector = build_detector(cfg.inference, weights_path)
     engine = EventEngine(cfg.hub_id)
-    fall_engine = (
-        FallEngine(cfg.hub_id, min_score=cfg.inference.fall.min_score)
-        if cfg.inference.fall.enabled
-        else None
-    )
-    if fall_engine is not None:
-        _log.info("analítica de caídas activada (min_score=%.2f)", cfg.inference.fall.min_score)
-    tracker = Tracker() if fall_engine is not None else None
+    fall_engine, inactivity_engine, tracker = _build_analytics(cfg)
     monitor = ConnectionMonitor(cfg.hub_id)
     uplink = build_uplink(cfg)
     sink = uplink.sink
@@ -129,6 +151,7 @@ def run(config_path: Path, weights_path: str, env: dict[str, str]) -> None:
             fall_engine,
             tracker,
             identifier,
+            inactivity_engine,
         )
 
     supervisor = CameraSupervisor(worker)
@@ -285,6 +308,7 @@ def _camera_loop(  # type: ignore[no-untyped-def]
     fall_engine=None,
     tracker=None,
     identifier=None,
+    inactivity_engine=None,
 ):
     attempt = 0
     while not stop.is_set():
@@ -330,6 +354,7 @@ def _camera_loop(  # type: ignore[no-untyped-def]
                             fall_engine=fall_engine,
                             tracker=tracker,
                             identifier=identifier,
+                            inactivity_engine=inactivity_engine,
                         )
                     except Exception:  # noqa: BLE001 — un frame malo no tumba el worker
                         _log.exception("cam %s error procesando frame", camera.id)

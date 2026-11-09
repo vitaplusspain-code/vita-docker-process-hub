@@ -298,6 +298,16 @@ De la implementación:
   módulos que usen `_log.exception` pueden filtrar URIs RTSP con credenciales. Redactar también el
   campo de excepción en `logging_setup.py`.
 
+## Inactividad por persona (diferido)
+- **Inactividad en el informe diario:** necesita una migración, un cambio en la app y deduplicar con
+  la alerta del reloj.
+- **Fusionar alertas del reloj y de cámara:** hoy son independientes; unirlas exige decidir
+  prioridad y deduplicación entre fuentes.
+- **Calibrar `RADIUS_FACTOR`, `MOVE_CONFIRM_S`, `PARK_*` y `RESUME_IOU`:** se eligieron por
+  razonamiento, sin medir con vídeo real.
+- **Límite conocido:** una identidad aparcada puede ser heredada por otra persona cuya cara nunca
+  se ve (spec de inactividad §4.3).
+
 ## Verificación pendiente en hardware real
 Las partes de red (descubrimiento ONVIF, captura RTSP) no corren en CI por diseño. Validar
 extremo-a-extremo contra una cámara real: `docker compose up` con la credencial del hogar y
