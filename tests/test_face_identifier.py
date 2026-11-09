@@ -175,10 +175,17 @@ def test_provisional_confirmed_by_same_person():
 
 
 def test_provisional_respects_attempt_cadence():
-    ident = _identifier([[FACE], [FACE]])
-    tracker = Tracker()
-    m0 = _matches(tracker, [PERSON], 0.0)
-    m0[0].track.identity = TrackIdentity("pepe", 0.7, provisional=True)
+    stranger = FaceObservation((130, 20, 170, 70), _unit([0, 0, 1]))  # no matchea a nadie
+    ident = _identifier([[stranger], [stranger], [stranger]])
+    m0 = _matches(Tracker(), [PERSON], 0.0)
+    provisional = TrackIdentity("pepe", 0.7, provisional=True)
+    m0[0].track.identity = provisional
     ident.identify(None, "cam-a", m0, 0.0)
-    ident.identify(None, "cam-a", m0, 0.4)
     assert ident._engine.calls == 1  # type: ignore[attr-defined]
+    assert m0[0].track.identity == provisional
+    ident.identify(None, "cam-a", m0, 0.4)  # dentro de la ventana: no extrae
+    assert ident._engine.calls == 1  # type: ignore[attr-defined]
+    assert m0[0].track.identity == provisional
+    ident.identify(None, "cam-a", m0, ATTEMPT_EVERY_S)
+    assert ident._engine.calls == 2  # type: ignore[attr-defined]
+    assert m0[0].track.identity == provisional
