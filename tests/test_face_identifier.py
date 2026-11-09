@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from vitahub.analytics.tracker import Tracker, TrackIdentity
 from vitahub.identity.base import FaceObservation
@@ -123,3 +124,61 @@ def test_face_assigned_to_smallest_containing_track():
     small = min(m1, key=lambda m: (m.track.bbox[2] - m.track.bbox[0])
                 * (m.track.bbox[3] - m.track.bbox[1])).track
     assert small.identity == TrackIdentity("maria", 1.0)
+
+
+def _face_with_sim(sim):
+    """Cara cuyo embedding tiene similitud `sim` con MARIA y 0 con PEPE."""
+    emb = np.array([sim, 0.0, (1 - sim**2) ** 0.5], dtype=np.float32)
+    return FaceObservation((130, 20, 170, 70), emb)
+
+
+def test_provisional_track_keeps_extraction_running():
+    ident = _identifier([[FACE]])
+    m0 = _matches(Tracker(), [PERSON], 0.0)
+    m0[0].track.identity = TrackIdentity("maria", 0.7, provisional=True)
+    ident.identify(None, "cam-a", m0, 0.0)
+    assert ident._engine.calls == 1  # type: ignore[attr-defined]
+
+
+def test_provisional_relabelled_by_any_valid_match_of_other_person():
+    face = _face_with_sim(0.45)  # válida (>0.4) pero menor que la confianza 0.9
+    ident = _identifier([[face]])
+    m0 = _matches(Tracker(), [PERSON], 0.0)
+    m0[0].track.identity = TrackIdentity("pepe", 0.9, provisional=True)
+    ident.identify(None, "cam-a", m0, 0.0)
+    got = m0[0].track.identity
+    assert got is not None
+    assert got.person_id == "maria"
+    assert got.confidence == pytest.approx(0.45, abs=1e-5)
+    assert got.provisional is False
+
+
+def test_non_provisional_keeps_identity_against_weaker_match_of_other_person():
+    face = _face_with_sim(0.45)
+    ident = _identifier([[face]])
+    m0 = _matches(Tracker(), [PERSON], 0.0)
+    m0[0].track.identity = TrackIdentity("pepe", 0.9)
+    ident.identify(None, "cam-a", m0, 0.0)  # sin provisional no se extrae
+    assert m0[0].track.identity == TrackIdentity("pepe", 0.9)
+    # y aunque se aplique directamente, la regla sim > confidence lo mantiene
+    ident._apply("cam-a", m0[0].track, "maria", 0.45)
+    assert m0[0].track.identity == TrackIdentity("pepe", 0.9)
+
+
+def test_provisional_confirmed_by_same_person():
+    face = _face_with_sim(0.5)
+    ident = _identifier([[face]])
+    m0 = _matches(Tracker(), [PERSON], 0.0)
+    m0[0].track.identity = TrackIdentity("maria", 0.7, provisional=True)
+    ident.identify(None, "cam-a", m0, 0.0)
+    assert m0[0].track.identity == TrackIdentity("maria", 0.7, provisional=False)
+
+
+def test_provisional_respects_attempt_cadence():
+    ident = _identifier([[FACE], [FACE]])
+    tracker = Tracker()
+    m0 = _matches(tracker, [PERSON], 0.0)
+    m0[0].track.identity = TrackIdentity("pepe", 0.7, provisional=True)
+    ident.identify(None, "cam-a", m0, 0.0)
+    ident.identify(None, "cam-a", m0, 0.4)
+    assert ident._engine.calls == 1  # type: ignore[attr-defined]

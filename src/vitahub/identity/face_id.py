@@ -8,6 +8,8 @@ extracción sirve a todas las pistas del frame). Ese ahorro no es gratis para
 siempre: una persona no enrolada es anónima para siempre, así que mientras
 esté en cámara la extracción sigue corriendo 1 vez/s por cámara
 indefinidamente — no hay backoff para "esta pista nunca va a matchear".
+La extracción también corre mientras alguna identidad sea provisional (heredada
+de una pista aparcada tras una pérdida): se comprueba hasta confirmarla o corregirla.
 """
 from __future__ import annotations
 
@@ -51,7 +53,7 @@ class FaceIdentifier:
         self._last_attempt: dict[str, float] = {}
 
     def identify(self, frame: object, camera_id: str, matches: list[Match], now: float) -> None:
-        if not any(m.track.identity is None for m in matches):
+        if not any(m.track.identity is None or m.track.identity.provisional for m in matches):
             return
         last = self._last_attempt.get(camera_id)
         if last is not None and now - last < ATTEMPT_EVERY_S:
@@ -71,6 +73,19 @@ class FaceIdentifier:
             self._apply(camera_id, track, person_id, sim)
 
     def _apply(self, camera_id: str, track: Track, person_id: str, sim: float) -> None:
+        if track.identity is not None and track.identity.provisional:
+            # Identidad heredada de una pista aparcada: cualquier coincidencia
+            # válida de otra persona la reetiqueta (aunque su similitud sea
+            # menor que la confianza heredada); la de la misma persona la confirma.
+            if person_id != track.identity.person_id:
+                _log.warning(
+                    "cam %s pista %d: identidad corregida %s → %s (sim %.2f, provisional)",
+                    camera_id, track.track_id, track.identity.person_id, person_id, sim,
+                )
+                track.identity = TrackIdentity(person_id, sim)
+            else:
+                track.identity = TrackIdentity(person_id, max(sim, track.identity.confidence))
+            return
         if track.identity is not None:
             # Corrección de cruce de pistas: solo si otra persona aparece con
             # una similitud claramente mejor que la que etiquetó la pista.
