@@ -7,7 +7,7 @@ from vitahub.analytics.inactivity_engine import (
     InactivityEngine,
     feet_point,
 )
-from vitahub.analytics.tracker import Tracker, TrackIdentity
+from vitahub.analytics.tracker import Match, Track, Tracker, TrackerUpdate, TrackIdentity
 from vitahub.models import Camera, Detection
 
 CAM = Camera(id="cam1", name="salon", last_ip="10.0.0.5")
@@ -130,8 +130,12 @@ def test_confirmed_move_ends_with_moved_and_last_inside_time():
     assert end.payload["started_at"] == _wall(0)
     assert end.payload["episode_id"] == start.payload["episode_id"]
     assert end.payload["person"] == {"id": "ana", "confidence": 0.7}
-    # tras el fin arranca un candidato nuevo en la posición nueva: no re-emite
-    assert _run(engine, tracker, clock, _still(SIT, 365, 400)) == []
+    # tras el fin arranca un candidato nuevo en la posición nueva, desde la
+    # confirmación (360 + MOVE_CONFIRM_S), y emite 5 min después
+    later = _run(engine, tracker, clock, [(365 + i * 0.5, [_ankles_at(450)]) for i in range(700)])
+    assert [e.type for e in later] == ["inactivity_started"]
+    assert later[0].payload["started_at"] == _wall(362)
+    assert later[0].timestamp == _wall(662)
 
 
 def test_identity_changed_ends_episode():
@@ -187,3 +191,79 @@ def test_person_yolo_boxes_without_keypoints():
     frames = [(i * 0.5, [Detection("person", 0.8, SIT, keypoints=None)]) for i in range(700)]
     events = _run(engine, tracker, clock, frames)
     assert [e.type for e in events] == ["inactivity_started"]
+
+
+def _excursion(out_s):
+    """Quieta 6 min, `out_s` segundos con los pies fuera, y de vuelta."""
+    frames = [(i * 0.5, [_ankles_at(150)]) for i in range(720)]
+    n_out = int(out_s * 2) + 1
+    frames += [(360 + i * 0.5, [_ankles_at(450)]) for i in range(n_out)]
+    back = 360 + n_out * 0.5
+    frames += [(back + i * 0.5, [_ankles_at(150)]) for i in range(20)]
+    return frames
+
+
+def test_excursion_below_confirm_threshold_does_not_end():
+    engine, tracker, clock = _setup()
+    events = _run(engine, tracker, clock, _excursion(1.5))
+    assert [e.type for e in events] == ["inactivity_started"]
+
+
+def test_excursion_at_confirm_threshold_ends():
+    engine, tracker, clock = _setup()
+    events = _run(engine, tracker, clock, _excursion(2.0))
+    assert [e.type for e in events] == ["inactivity_started", "inactivity_ended"]
+    assert events[1].payload["reason"] == "moved"
+
+
+def test_slow_drift_past_radius_ends_episode():
+    engine, tracker, clock = _setup()
+    # 10 px por muestra: cada paso cae dentro del radio del anterior, pero el
+    # ancla es fija y el total (radio 100) acaba fuera
+    frames = [(i * 0.5, [_ankles_at(150)]) for i in range(720)]
+    frames += [(360 + i * 0.5, [_ankles_at(150 + 10 * (i + 1))]) for i in range(30)]
+    events = _run(engine, tracker, clock, frames)
+    assert [e.type for e in events] == ["inactivity_started", "inactivity_ended"]
+    # última muestra dentro: desplazamiento 100 (i = 9 -> t = 364.5)
+    assert events[1].payload["ended_at"] == _wall(364.5)
+
+
+def _direct(engine, clock, frames):
+    """Alimenta el motor con una pista fija e identificada, sin pasar por el
+    Tracker (permite cajas que el emparejamiento por IoU no seguiría)."""
+    track = Track(1, frames[0][1].bbox, 0.0, ANA)
+    events = []
+    for now, det in frames:
+        clock.t = T0 + timedelta(seconds=now)
+        track.bbox = det.bbox
+        track.last_seen = now
+        events += engine.observe(CAM, TrackerUpdate([Match(track, det, 0.5)], []), now)
+    return events
+
+
+def test_scale_grows_with_largest_box_of_episode():
+    engine, _, clock = _setup()
+    standing = (110, 0, 190, 400)
+    # de pie y se desplaza 150 px: dentro del radio de la caja de pie (200),
+    # fuera del de la sentada (100) -> no termina
+    moved = (260, 0, 340, 400)
+    frames = [(i * 0.5, _det(SIT)) for i in range(721)]
+    frames += [(360.5 + i * 0.5, _det(standing)) for i in range(10)]
+    frames += [(366 + i * 0.5, _det(moved)) for i in range(60)]
+    events = _direct(engine, clock, frames)
+    assert [e.type for e in events] == ["inactivity_started"]
+
+
+def test_new_candidate_after_move_uses_current_box_scale():
+    engine, _, clock = _setup(min_minutes=1.0)
+    big = (0, 0, 400, 600)  # cerca de la cámara: radio 300
+    small = (950, 450, 1050, 600)  # lejos: radio 75
+    shifted = (1050, 450, 1150, 600)  # 100 px: fuera de 75, dentro de 300
+    frames = [(i * 0.5, _det(big)) for i in range(20)]
+    frames += [(10 + i * 0.5, _det(small)) for i in range(8)]  # movida confirmada en 12
+    frames += [(14 + i * 0.5, _det(shifted)) for i in range(300)]
+    events = _direct(engine, clock, frames)
+    assert [e.type for e in events] == ["inactivity_started"]
+    # candidato nuevo en 12; la caja pequeña da radio 75, así que el
+    # desplazamiento de 100 lo reinicia en 16 (con escala 600 no habría reinicio)
+    assert events[0].payload["started_at"] == _wall(16)

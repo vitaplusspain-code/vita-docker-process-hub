@@ -140,7 +140,9 @@ class InactivityEngine:
             else:
                 ep.scale = max(ep.scale, _largest_side(det.bbox))
 
-            events += self._advance(camera, cam, ep, track.track_id, feet, now)
+            events += self._advance(
+                camera, cam, ep, track.track_id, feet, _largest_side(det.bbox), now
+            )
         return events
 
     # --- estado por episodio ----------------------------------------------
@@ -152,6 +154,7 @@ class InactivityEngine:
         ep: _Episode,
         track_id: int,
         feet: tuple[float, float],
+        side: float,
         now: float,
     ) -> list[Event]:
         dist = math.hypot(feet[0] - ep.anchor[0], feet[1] - ep.anchor[1])
@@ -166,13 +169,14 @@ class InactivityEngine:
             events: list[Event] = []
             if ep.emitted:
                 events.append(self._ended(camera, ep, ep.last_inside, now, "moved"))
-            # Candidato nuevo anclado donde está ahora.
+            # Candidato nuevo anclado donde está ahora y con la escala de la caja
+            # actual: la de la posición anterior (p. ej. cerca de la cámara) no vale.
             cam.episodes[track_id] = _Episode(
                 person_id=ep.person_id,
                 person=ep.person,
                 anchor=feet,
                 start=now,
-                scale=ep.scale,
+                scale=side,
                 last_inside=now,
             )
             return events
