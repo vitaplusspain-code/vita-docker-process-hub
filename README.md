@@ -126,8 +126,9 @@ eventos `fall_detected`/`fall_update`/`fall_resolved`, con `score` y `signals`, 
 ## Inactividad de la persona objetivo (opcional)
 
 Pon `inference.inactivity.enabled: true` (y `min_minutes`, por defecto 5.0) en `hub.yaml`. Requiere
-`detector: person_pose` y la identidad activa (`inference.identity`): solo se sigue a una persona
-identificada. Salen `inactivity_started`/`inactivity_ended` por stdout y por AWS. Para comprobarlo
+la identidad activa (`inference.identity.enabled`): solo se sigue a una persona identificada.
+Funciona con `person_yolo` o `person_pose` (con pose usa los tobillos como punto de pies; si no, el
+borde inferior de la caja). Salen `inactivity_started`/`inactivity_ended` por stdout y por AWS. Para comprobarlo
 con un vídeo: `python scripts/replay_video.py <video> --faces <carpeta> --inactivity-min 0.5`.
 No requiere `fall.enabled`.
 
