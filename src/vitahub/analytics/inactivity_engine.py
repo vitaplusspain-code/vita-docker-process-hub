@@ -150,6 +150,10 @@ class InactivityEngine:
             ep = cam.episodes.get(track.track_id)
 
             if ep is not None and ep.person_id != identity.person_id:
+                # Se saca del estado antes de la guarda de abajo: si la nueva
+                # persona ya tiene episodio en otra pista, el viejo no puede
+                # quedarse y volver a cerrarse en cada frame.
+                del cam.episodes[track.track_id]
                 if ep.emitted:
                     events.append(self._ended(camera, ep, now, now, "identity_changed"))
                 ep = None

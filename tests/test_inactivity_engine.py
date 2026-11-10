@@ -414,3 +414,25 @@ def test_identity_dropped_while_emitted_ends_with_identity_changed():
     assert [e.type for e in more] == ["inactivity_ended"]
     assert more[0].payload["reason"] == "identity_changed"
     assert more[0].payload["ended_at"] == _wall(310.5)
+
+
+def test_relabel_to_person_with_episode_ends_once_and_frees_old_person():
+    # La cara corrige la pista A (luis → ana) mientras la pista B ya lleva el
+    # episodio de ana: el de luis se cierra una sola vez y no queda colgado.
+    engine, tracker, clock = _setup(min_minutes=1.0)
+    other = (400, 200, 500, 400)
+    luis = TrackIdentity("luis", 0.6)
+    frames = [(i * 0.5, [_det(SIT), _det(other)]) for i in range(130)]
+    events = _run(engine, tracker, clock, frames,
+                  ident=lambda det: luis if det.bbox == SIT else ANA)
+    assert sorted(e.payload["person"]["id"] for e in events) == ["ana", "luis"]
+    track_a = next(t for t in tracker._cameras[CAM.id].tracks if t.bbox == SIT)
+    track_a.identity = ANA
+    more = _run(engine, tracker, clock,
+                [(65 + i * 0.5, [_det(SIT), _det(other)]) for i in range(20)])
+    ended = [e for e in more if e.type == "inactivity_ended"]
+    assert len(ended) == 1
+    assert ended[0].payload["person"]["id"] == "luis"
+    assert ended[0].payload["reason"] == "identity_changed"
+    # luis ya no tiene episodio: una pista nueva de luis puede abrir el suyo.
+    assert all(ep.person_id != "luis" for ep in engine._cameras[CAM.id].episodes.values())
