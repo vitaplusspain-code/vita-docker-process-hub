@@ -168,12 +168,12 @@ class InactivityEngine:
                 if ep.emitted:
                     events.append(self._ended(camera, ep, now, now, "identity_changed"))
                 ep = None
-            feet = feet_point(det)
             if touches_bottom(det.bbox, frame_size) and not _ankles_confident(det):
                 # Caja cortada por abajo sin tobillos fiables: la base de la caja
                 # no es donde pisa. Muestra neutra: el episodio sigue y su tiempo
                 # corre, pero no mueve el radio ni la escala.
                 continue
+            feet = feet_point(det)
             if ep is None:
                 if any(
                     other.person_id == identity.person_id

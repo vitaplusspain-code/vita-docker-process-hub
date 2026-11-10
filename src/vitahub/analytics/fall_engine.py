@@ -176,17 +176,22 @@ class FallEngine:
 
         signals = compute_signals(det.keypoints, det.bbox, state.history, now, state.floor_time)
 
+        # Caja cortada por el borde y sin torso fiable: las proporciones de la
+        # caja truncada no dicen nada de la postura. Muestra neutra en todo
+        # estado: ni suma ni reinicia contadores, la postura anterior se
+        # conserva y el episodio ni se cierra ni se estanca. La muestra sí queda
+        # en el historial (drop_speed sigue calculándose con alturas reales).
+        if signals.torso_angle is None and touches_edge(det.bbox, frame_size):
+            return []
+
         # El frame de la transición arranca el contador en 0; a partir de ahí
         # cada muestra suma lo que se ha visto realmente.
-        # Caja cortada por el borde y sin torso fiable: las proporciones de la
-        # caja truncada no dicen nada de la postura, ni tumbada ni de pie.
-        cut_blind = signals.torso_angle is None and touches_edge(det.bbox, frame_size)
-        horizontal = not cut_blind and is_horizontal(signals)
+        horizontal = is_horizontal(signals)
         if horizontal:
             state.floor_time = state.floor_time + step if state.posture == "floor" else 0.0
             state.upright_time = 0.0
             state.posture = "floor"
-        elif not cut_blind and is_upright(signals):
+        elif is_upright(signals):
             state.upright_time = state.upright_time + step if state.posture == "upright" else 0.0
             state.floor_time = 0.0
             state.posture = "upright"

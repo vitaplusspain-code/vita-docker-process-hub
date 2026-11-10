@@ -464,3 +464,40 @@ def test_frame_size_none_keeps_old_behaviour():
     eng, tracker, clock = _engine()
     events = _feed_fs(eng, tracker, clock, [[_nose_only_cut()]] * 20, None)
     assert [e.type for e in events] == ["lying_detected"]
+
+
+def _blind_near_lying():
+    kps = [(0.0, 0.0, 0.0)] * 17
+    kps[NOSE] = (10.0, 115.0, 0.9)
+    return Detection("person", 0.9, (0, 50, 100, 120), tuple(kps))
+
+
+def _feed_at(engine, tracker, clock, seq, start, frame_size=FRAME, step=0.5):
+    events = []
+    now = start
+    for dets in seq:
+        events += engine.observe(CAM, tracker.observe(CAM.id, dets, now), now, frame_size=frame_size)
+        now += step
+        clock.advance(step)
+    return events, now
+
+
+def test_blind_samples_do_not_resolve_lying_episode():
+    eng, tracker, clock = _engine()
+    events, now = _feed_at(eng, tracker, clock, [[lying()]] * 6, 0.0)
+    assert _types(events) == ["lying_detected"]
+    events, now = _feed_at(eng, tracker, clock, [[_blind_near_lying()]] * 20, now)
+    assert "lying_resolved" not in _types(events)
+    events, now = _feed_at(eng, tracker, clock, [[standing()]] * 6, now)
+    resolved = [e for e in events if e.type == "lying_resolved"]
+    assert len(resolved) == 1 and resolved[0].payload["reason"] == "upright"
+
+
+def test_blind_samples_do_not_stall_candidate():
+    eng, tracker, clock = _engine()
+    events, now = _feed_at(eng, tracker, clock, [[standing()]] * 2 + [[lying()]] * 3, 0.0)
+    assert events == []
+    events, now = _feed_at(eng, tracker, clock, [[_blind_near_lying()]] * 10, now)
+    assert events == []
+    events, now = _feed_at(eng, tracker, clock, [[lying()]] * 3, now)
+    assert set(_types(events)) & {"fall_detected", "lying_detected"}

@@ -317,6 +317,9 @@ De la implementación:
 - **El payload de `fall_detected` no lleva marca de identidad provisional:** añadirla cambia el
   contrato de caídas y afecta al motor de reglas, así que se difiere.
 
+- **Límite conocido:** una caída real en el borde del fotograma con caderas y hombros ocultos no da
+  caída ni tumbado (la caja cortada sin torso no infiere postura); la presencia sigue funcionando.
+
 ## Verificación pendiente en hardware real
 Las partes de red (descubrimiento ONVIF, captura RTSP) no corren en CI por diseño. Validar
 extremo-a-extremo contra una cámara real: `docker compose up` con la credencial del hogar y
