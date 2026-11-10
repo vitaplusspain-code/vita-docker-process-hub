@@ -91,10 +91,14 @@ Estados por pista: `upright → candidate → reported` (caída) o `candidate �
 - **Entrada.** En `candidate`, con `horizontal` y `floor_time >= CONFIRM_FLOOR_S`, el episodio:
   - pasa a `reported` y emite `fall_detected`, como hoy, si hay bajada suficiente y el score
     llega al mínimo;
-  - pasa a `lying` y emite `lying_detected` en cualquier otro caso: sin bajada suficiente, o
-    con bajada pero sin llegar al score mínimo. *(Decisión del asistente.)* Nada que cumpla
-    «tumbado ≥ 2 s» se queda sin evento. Ojo: `peak_drop` se pone a cero al volver a estar de
-    pie, así que una caída lenta real acaba en tumbado, que es lo que busca el anti-objetivo.
+  - pasa a `lying` y emite `lying_detected` de inmediato si no hay bajada suficiente;
+  - con bajada suficiente pero score por debajo del mínimo, sigue en `candidate` mientras la
+    permanencia en el suelo sube el score: si llega al mínimo antes de
+    `CONFIRM_FLOOR_S + FALL_SCORE_WAIT_S` (3 s extra), emite `fall_detected`; si no, pasa a
+    `lying`. *(Decisión del asistente.)* Una caída real con score justo por debajo del mínimo a
+    los 2 s no puede quedarse en un tumbado, y nada que cumpla «tumbado ≥ 2 s» se queda sin
+    evento. Ojo: `peak_drop` se pone a cero al volver a estar de pie, así que una caída lenta
+    real acaba en tumbado, que es lo que busca el anti-objetivo.
 - **Salida.** En `lying`:
   - sin postura horizontal (de pie u `other`, incluida la caja cortada) durante
     `CONFIRM_UPRIGHT_S` seguidos: emite `lying_resolved` con `reason: "upright"`, que aquí

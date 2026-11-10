@@ -15,7 +15,7 @@ El emparejamiento entre frames (qué pista es qué persona) lo hace el
 `Match`/pistas perdidas y lleva el estado del episodio (postura, score,
 umbrales, cadencia de eventos) por track_id.
 Todo el estado es en memoria; un reinicio del hub a mitad de episodio
-pierde el fall_resolved (igual que el ConnectionMonitor, ver docs/backlog.md).
+pierde el fall_resolved o lying_resolved (igual que el ConnectionMonitor, ver docs/backlog.md).
 """
 from __future__ import annotations
 
@@ -41,6 +41,11 @@ from vitahub.models import Camera, Event
 HISTORY_S = 3.0
 # Tiempo mínimo en el suelo antes de emitir: evita disparar por un frame ruidoso.
 CONFIRM_FLOOR_S = 2.0
+# Espera extra (más allá de CONFIRM_FLOOR_S) a que el score de una bajada brusca
+# llegue a min_score antes de darla por tumbado: la permanencia en el suelo sube
+# el score con el tiempo. Valor calibrado: con 3 s la caída típica con score
+# justo por debajo del mínimo a los 2 s lo alcanza, sin retrasar el aviso de tumbado.
+FALL_SCORE_WAIT_S = 3.0
 # Tiempo de pie necesario para cerrar un episodio (o volver de candidate).
 CONFIRM_UPRIGHT_S = 2.0
 # Cadencia máxima de fall_update mientras sigue en el suelo.
@@ -204,15 +209,20 @@ class FallEngine:
             current = score(signals)
             if not (horizontal and floor_time >= CONFIRM_FLOOR_S):
                 return []
+            sharp = state.peak_drop is not None and state.peak_drop >= MIN_FALL_DROP
+            # Bajada brusca con score aún corto: la permanencia lo sube; se
+            # espera hasta FALL_SCORE_WAIT_S antes de rendirse a tumbado.
+            if (
+                sharp
+                and current < self._min_score
+                and floor_time < CONFIRM_FLOOR_S + FALL_SCORE_WAIT_S
+            ):
+                return []
             cam.episodes += 1
             state.episode_id = f"{camera.id}-{int(self._clock().timestamp())}-{cam.episodes}"
             state.episode_start = now
             state.last_event_at = now
-            if (
-                state.peak_drop is not None
-                and state.peak_drop >= MIN_FALL_DROP
-                and current >= self._min_score
-            ):
+            if sharp and current >= self._min_score:
                 state.state = "reported"
                 state.max_score = current
                 return [
@@ -220,7 +230,8 @@ class FallEngine:
                         camera, state, track, "fall_detected", current, signals, person_count
                     )
                 ]
-            # En el suelo sin bajada brusca (o con score bajo): tumbado, no caída.
+            # Sin bajada brusca, o con ella pero sin llegar al score mínimo a
+            # tiempo: tumbado, no caída.
             state.state = "lying"
             state.not_floor_time = 0.0
             return [self._lying_detected(camera, state, track, signals, person_count)]

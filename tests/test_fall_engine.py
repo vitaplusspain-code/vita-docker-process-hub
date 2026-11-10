@@ -85,7 +85,7 @@ def test_score_below_min_score_becomes_lying():
     # episodio sale como tumbado (lying_detected), nunca se descarta en silencio.
     seq = [[standing()]] * 2 + [[lying()]] * 6
     eng, tracker, clock = _engine(min_score=0.95)
-    events = _feed(eng, tracker, clock, seq)
+    events = _feed(eng, tracker, clock, seq + [[lying()]] * 10)
     assert [e.type for e in events] == ["lying_detected"]
     eng2, tracker2, clock2 = _engine(min_score=0.3)
     assert [e.type for e in _feed(eng2, tracker2, clock2, seq)] == ["fall_detected"]
@@ -372,7 +372,7 @@ def test_lying_resolves_on_track_lost():
     events = _feed(eng, tracker, clock, [[]] * 7, start=start)  # 3.5 s sin verla
     assert _types(events) == ["lying_resolved"]
     assert events[0].payload["reason"] == "track_lost"
-    assert events[0].payload["duration_s"] >= 0
+    assert events[0].payload["duration_s"] >= 3.0
     assert events[0].payload["episode_id"] == detected.payload["episode_id"]
 
 
@@ -384,5 +384,32 @@ def test_lying_never_escalates_to_fall():
     low = Detection("person", 0.9, (0, 50, 100, 120),
                     _pose(nose=(10, 60), shoulders=(30, 60), hips=(90, 60)))
     events = _feed(eng, tracker, clock, [[low], [jump]] + [[lying()]] * 6, start=start)
-    assert "fall_detected" not in _types(events)
-    assert "fall_update" not in _types(events)
+    types = _types(events)
+    assert "fall_detected" not in types
+    assert "fall_update" not in types
+    assert "lying_resolved" not in types
+    assert "lying_detected" not in types
+
+
+def test_sharp_fall_with_low_score_waits_and_reports_fall():
+    # Bajada brusca, ángulo ~62°, cabeza no baja: a los 2 s el score queda por
+    # debajo de min_score, pero la permanencia lo sube y acaba en caída.
+    eng, tracker, clock = _engine(min_score=0.3)
+    start = Detection("person", 0.9, (30, 0, 70, 120),
+                      _pose(nose=(50, 10), shoulders=(50, 30), hips=(50, 50)))
+    drop = Detection("person", 0.9, (0, 50, 100, 120),
+                     _pose(nose=(10, 40), shoulders=(30, 50), hips=(67, 71)))
+    events = _feed(eng, tracker, clock, [[start]] * 2 + [[drop]] * 12)
+    types = _types(events)
+    assert "lying_detected" not in types
+    assert types.count("fall_detected") == 1
+    # No es inmediato: el score a los 2 s estaba por debajo del mínimo.
+    assert events[0].payload["signals"]["floor_time_s"] > 2.0
+
+
+def test_sharp_drop_never_reaching_min_score_becomes_lying_after_wait():
+    eng, tracker, clock = _engine(min_score=0.9)
+    events = _feed(eng, tracker, clock, [[standing()]] * 2 + [[lying()]] * 14)
+    assert _types(events) == ["lying_detected"]
+    # CONFIRM_FLOOR_S + FALL_SCORE_WAIT_S = 5 s en el suelo.
+    assert events[0].payload["signals"]["floor_time_s"] == 5.0
