@@ -223,9 +223,16 @@ integración del slice.
 - Calibrar `MIN_FALL_DROP` (0.2–0.4) y `EDGE_MARGIN_PX` con `scripts/replay_video.py` sobre
   vídeos reales antes del piloto.
 - Clip para el aviso de tumbado, diferido por decisión del usuario.
-- Exclusión de zonas de sofá/cama: durante un tramo ciego (caja cortada por el borde sin torso
-  visible) no se emiten `fall_update` ni `lying_update`; > 10 min ciego activa el manejo de
-  huérfanos del rule engine.
+- Tramo ciego (caja cortada por el borde sin torso visible): no se emiten `fall_update` ni
+  `lying_update`; > 10 min ciego activa el manejo de huérfanos del rule engine.
+- Cota de edad de la bajada: contar una bajada solo si ocurrió hasta N s antes de que empiece
+  `floor_time`. Un `peak_drop` viejo en la candidata puede convertir agacharse + sentarse + tumbarse
+  en una caída `critical`.
+- El tramo ciego pospone `inactivity_started`: una persona en el escritorio cortada por el borde
+  inferior no tiene monitorización de inactividad. Recomendación de colocación de cámara: que la
+  persona objetivo quede entera dentro del encuadre.
+- Prioridad de calibración: las caídas hacia atrás o hacia el fondo (alejándose de la cámara) son las
+  más cercanas a `MIN_FALL_DROP` (sonda 0.41).
 
 #### Originales del slice de 2026-08-22
 

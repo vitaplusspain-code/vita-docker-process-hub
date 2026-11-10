@@ -100,7 +100,8 @@ Estados por pista: `upright → candidate → reported` (caída) o `candidate �
     evento. Ojo: `peak_drop` se pone a cero al volver a estar de pie, así que una caída lenta
     real acaba en tumbado, que es lo que busca el anti-objetivo.
 - **Salida.** En `lying`:
-  - sin postura horizontal (de pie u `other`, incluida la caja cortada) durante
+  - sin postura horizontal (de pie u `other`; la muestra ciega por el borde es neutra y no
+    cuenta, ver §5) durante
     `CONFIRM_UPRIGHT_S` seguidos: emite `lying_resolved` con `reason: "upright"`, que aquí
     significa «ya no está tumbada». Sentarse en la cama también cierra el episodio.
     *(Decisión del asistente.)* Si no, un episodio podría quedarse abierto para siempre en
@@ -136,14 +137,16 @@ Eventos (mismo sobre, mismo canal):
 - Una caja está **cortada** si alguno de sus lados está a `EDGE_MARGIN_PX` o menos del borde
   correspondiente del fotograma. Valor inicial: 2 px, ajustable.
 - **Caídas y tumbado.** Si la caja está cortada y no hay ángulo de torso (faltan hombros o
-  caderas), la postura de esa muestra es `other`: ni tumbado ni de pie. Los contadores de
-  suelo y de pie vuelven a cero, como ya ocurre hoy con `other`. Con torso visible manda el
-  ángulo, como hoy, aunque la caja esté cortada.
+  caderas), la muestra es ciega y **neutra en todo estado** del motor: se añade al historial, pero
+  no avanza ni reinicia ningún contador de postura, se conserva la postura anterior y nunca cierra
+  un episodio de tumbado ni frena una candidata. (Decisión del asistente, tras revisión.) Con
+  torso visible manda el ángulo, como hoy, aunque la caja esté cortada.
 - **Inactividad.** Si la caja está cortada **por abajo** y no hay tobillos fiables, el punto
   de pies no es fiable. La muestra no cuenta ni como dentro ni como fuera del radio: el
   episodio sigue, pero ni avanza la confirmación de movimiento ni se actualiza la escala.
   *(Decisión del asistente.)* El tiempo de inactividad sigue corriendo, igual que durante una
-  ocultación.
+  ocultación. Como `continue` se salta `_advance`, también se pospone la comprobación de emisión
+  de `inactivity_started` durante el tramo ciego; sale con la primera muestra normal.
 - La cabeza baja (`head_low`) con la caja cortada tampoco se fía, pero queda cubierta: sin
   postura horizontal no hay episodio.
 

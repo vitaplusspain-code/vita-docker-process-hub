@@ -180,7 +180,8 @@ class FallEngine:
         # caja truncada no dicen nada de la postura. Muestra neutra en todo
         # estado: ni suma ni reinicia contadores, la postura anterior se
         # conserva y el episodio ni se cierra ni se estanca. La muestra sí queda
-        # en el historial (drop_speed sigue calculándose con alturas reales).
+        # en el historial, pero su punto de referencia puede ser el centro de una
+        # caja truncada, no la altura real: pendiente de calibración con vídeo real.
         if signals.torso_angle is None and touches_edge(det.bbox, frame_size):
             return []
 

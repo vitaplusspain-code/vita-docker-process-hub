@@ -460,3 +460,23 @@ def test_cut_bottom_sample_is_neutral():
     # El episodio sigue vivo: al moverse de verdad se cierra con el mismo id.
     moved = _run(engine, tracker, clock, [(72.0 + i * 0.5, [_det((400, 200, 500, 400))]) for i in range(8)])
     assert [e.payload["episode_id"] for e in moved if e.type == "inactivity_ended"] == [eid]
+
+
+def test_blind_stretch_postpones_started_until_first_normal_sample():
+    engine, tracker, clock = _setup(min_minutes=1.0)
+    assert _run(engine, tracker, clock, _still(SIT, 0, 30)) == []
+
+    # Caja pegada al borde inferior (alto 400), sin tobillos: muestra ciega.
+    # El tramo cruza min_minutes (60 s) sin emitir nada.
+    out = []
+    for i in range(80):
+        now = 30.5 + i * 0.5
+        clock.t = T0 + timedelta(seconds=now)
+        update = tracker.observe(CAM.id, [_det(SIT)], now)
+        out += engine.observe(CAM, update, now, frame_size=(640, 400))
+    assert out == []
+
+    # Primera muestra normal tras el tramo ciego: sale con el inicio real.
+    events = _run(engine, tracker, clock, [(71.0, [_det(SIT)])])
+    assert [e.type for e in events] == ["inactivity_started"]
+    assert events[0].payload["started_at"] == _wall(0)

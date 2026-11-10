@@ -121,24 +121,34 @@ Certificado comprometido o Jetson perdido: se revoca ese hogar y solo ese, con
 
 Pon `detector: person_pose` y `fall.enabled: true` (dentro de `inference:`) en `hub.yaml`.
 
-**Caída:** `fall_detected` solo se emite si hay una bajada brusca (≥ `MIN_FALL_DROP` 0.3 box heights/s)
-seguida de postura horizontal y score ≥ mínimo. Si la bajada es clara pero el score está justo
-por debajo del mínimo, el hub espera hasta `FALL_SCORE_WAIT_S` (3 s) a que la permanencia en el
-suelo lo suba; si no llega al mínimo en ese plazo, se trata como tumbado. Eventos: `fall_detected`,
-`fall_update` (cada 60 s), `fall_resolved`.
+**Caída:** `fall_detected` solo se emite si hay una bajada brusca (≥ `MIN_FALL_DROP` 0.3 alturas de caja
+por segundo) seguida de postura horizontal y score ≥ mínimo. Si la bajada es clara pero el score no llega
+al mínimo, el hub espera hasta `FALL_SCORE_WAIT_S` (3 s) a que la permanencia en el suelo lo suba; si lo
+alcanza en ese plazo emite `fall_detected`, y si no, `lying_detected` (tumbado). Eventos: `fall_detected`,
+`fall_update` (cada 10 s), `fall_resolved`.
 
 **Tumbado sin bajada:** si la persona lleva ≥ 2 s en postura horizontal sin haber tenido bajada
-brusca, el hub emite `lying_detected` (severity `high`, frente a `critical` de la caída). Mientras
+brusca, el hub emite `lying_detected` (severity `high`, igual que `fall_detected`). Mientras
 dura el episodio salen `lying_update` cada 60 s. Se cierra con `lying_resolved` cuando deja de estar
 tumbado (upright) o se pierde la pista (track_lost). El rule engine abre una alerta si el episodio
 dura ≥ 30 s dentro de la ventana de día. Sin clip por ahora.
 
-**Persona cortada por el borde:** una caja que toca el borde del fotograma sin visible torso no infiere
-postura y cuenta como `other` (ni tumbada ni de pie). Durante estos tramos no se emiten `fall_update` ni
-`lying_update`.
+**Persona cortada por el borde:** una caja que toca el borde del fotograma sin torso visible no infiere
+postura: es una muestra neutra, no cuenta ni como tumbada ni como de pie ni reinicia contadores. La postura
+anterior se conserva, y la muestra nunca cierra un episodio de tumbado ni frena una caída candidata. Durante
+estos tramos no se emiten `fall_update` ni `lying_update`.
 
-Todos los eventos llevan `score`, `signals` y `episode_id`, por stdout y por AWS (si el uplink está
-encendido). El hub no avisa a nadie: eso lo hará un sistema en AWS.
+Payloads, por stdout y por AWS (si el uplink está encendido):
+
+- `fall_detected`, `fall_update`: `episode_id`, `score`, `signals`, `person_count`, `person`.
+- `fall_resolved`: `episode_id`, `duration_s`, `max_score`, `reason`, `person`.
+- `lying_detected`: `episode_id`, `signals`, `person_count`, `person`.
+- `lying_update`: `episode_id`, `person`.
+- `lying_resolved`: `episode_id`, `duration_s`, `reason`, `person`.
+
+Las severidades `critical` y `high` de las alertas las fija el rule engine (`fall_confirmed` es `critical`,
+`prolonged_lying` es `high`); el hub emite `fall_detected` y `lying_detected` con severity `high` y los
+updates y resolved con `info`. El hub no avisa a nadie: eso lo hará un sistema en AWS.
 
 ## Inactividad de la persona objetivo (opcional)
 
@@ -147,6 +157,10 @@ la identidad activa (`inference.identity.enabled`): solo se sigue a una persona 
 Funciona con `person_yolo` o `person_pose` (con pose usa los tobillos como punto de pies; si no, el
 borde inferior de la caja). Salen `inactivity_started`/`inactivity_ended` por stdout y por AWS. Para comprobarlo
 con un vídeo: `python scripts/replay_video.py <video> --faces <carpeta> --inactivity-min 0.5`.
+Una caja cortada por el borde inferior sin tobillos fiables es una muestra neutra: no avanza el motor, así que
+tampoco se emite `inactivity_started` durante ese tramo (sale con la primera muestra normal, con el inicio
+real). Una persona cortada de forma permanente por abajo (p. ej. sentada justo bajo la cámara) no tiene
+monitorización de inactividad.
 No requiere `fall.enabled`.
 
 ## Despliegue en Jetson Orin (GPU)
