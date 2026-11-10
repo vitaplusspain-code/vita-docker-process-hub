@@ -436,3 +436,27 @@ def test_relabel_to_person_with_episode_ends_once_and_frees_old_person():
     assert ended[0].payload["reason"] == "identity_changed"
     # luis ya no tiene episodio: una pista nueva de luis puede abrir el suyo.
     assert all(ep.person_id != "luis" for ep in engine._cameras[CAM.id].episodes.values())
+
+
+def test_cut_bottom_sample_is_neutral():
+    engine, tracker, clock = _setup(min_minutes=1.0)
+    frames = _still(SIT, 0, 60)
+    events = _run(engine, tracker, clock, frames)
+    assert [e.type for e in events] == ["inactivity_started"]
+    eid = events[0].payload["episode_id"]
+
+    # Caja pegada al borde inferior, sin tobillos, con base muy lejos del ancla.
+    cut = (100, 260, 200, 360)
+    out = []
+    for i in range(21):
+        now = 60.5 + i * 0.5
+        clock.t = T0 + timedelta(seconds=now)
+        update = tracker.observe(CAM.id, [_det(cut)], now)
+        out += engine.observe(CAM, update, now, frame_size=(640, 360))
+    assert [e.type for e in out] == []
+
+    back = _run(engine, tracker, clock, [(71.0, [_det(SIT)]), (71.5, [_det(SIT)])])
+    assert back == []
+    # El episodio sigue vivo: al moverse de verdad se cierra con el mismo id.
+    moved = _run(engine, tracker, clock, [(72.0 + i * 0.5, [_det((400, 200, 500, 400))]) for i in range(8)])
+    assert [e.payload["episode_id"] for e in moved if e.type == "inactivity_ended"] == [eid]

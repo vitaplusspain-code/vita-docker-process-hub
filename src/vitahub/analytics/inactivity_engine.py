@@ -30,6 +30,7 @@ from datetime import datetime, timedelta
 from typing import Literal
 
 from vitahub.analytics.fall_engine import _person_payload, _utcnow
+from vitahub.analytics.frame_edges import touches_bottom
 from vitahub.analytics.tracker import TrackerUpdate
 from vitahub.models import Camera, Detection, Event
 
@@ -63,6 +64,11 @@ def feet_point(det: Detection) -> tuple[float, float]:
             return ((la[0] + ra[0]) / 2, (la[1] + ra[1]) / 2)
     x1, _, x2, y2 = det.bbox
     return ((x1 + x2) / 2, float(y2))
+
+
+def _ankles_confident(det: Detection) -> bool:
+    kps = det.keypoints
+    return kps is not None and kps[L_ANKLE][2] >= ANKLE_MIN_CONF and kps[R_ANKLE][2] >= ANKLE_MIN_CONF
 
 
 def _largest_side(bbox: tuple[int, int, int, int]) -> float:
@@ -104,7 +110,13 @@ class InactivityEngine:
         self._clock = clock
         self._cameras: dict[str, _CameraState] = {}
 
-    def observe(self, camera: Camera, update: TrackerUpdate, now: float) -> list[Event]:
+    def observe(
+        self,
+        camera: Camera,
+        update: TrackerUpdate,
+        now: float,
+        frame_size: tuple[int, int] | None = None,
+    ) -> list[Event]:
         cam = self._cameras.setdefault(camera.id, _CameraState())
         events: list[Event] = []
 
@@ -146,7 +158,6 @@ class InactivityEngine:
                     events.append(self._ended(camera, ep, now, now, "identity_changed"))
                 continue
             det = match.detection
-            feet = feet_point(det)
             ep = cam.episodes.get(track.track_id)
 
             if ep is not None and ep.person_id != identity.person_id:
@@ -157,6 +168,12 @@ class InactivityEngine:
                 if ep.emitted:
                     events.append(self._ended(camera, ep, now, now, "identity_changed"))
                 ep = None
+            feet = feet_point(det)
+            if touches_bottom(det.bbox, frame_size) and not _ankles_confident(det):
+                # Caja cortada por abajo sin tobillos fiables: la base de la caja
+                # no es donde pisa. Muestra neutra: el episodio sigue y su tiempo
+                # corre, pero no mueve el radio ni la escala.
+                continue
             if ep is None:
                 if any(
                     other.person_id == identity.person_id

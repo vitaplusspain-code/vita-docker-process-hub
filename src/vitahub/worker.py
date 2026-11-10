@@ -41,6 +41,8 @@ def process_frame(
     inactivity_engine: InactivityEngine | None = None,
 ) -> list[Event]:
     detections = detector.detect(frame)
+    shape = getattr(frame, "shape", None)
+    frame_size = (int(shape[1]), int(shape[0])) if shape is not None and len(shape) >= 2 else None
     person_count = sum(1 for d in detections if d.label == "person")
     confidence = max((d.confidence for d in detections), default=0.0)
     events = engine.observe(camera, person_count, confidence, now)
@@ -70,7 +72,7 @@ def process_frame(
         # a la presencia. Si el tracker falló no hay `update` y ninguno corre.
         if update is not None and fall_engine is not None:
             try:
-                events = events + fall_engine.observe(camera, update, now)
+                events = events + fall_engine.observe(camera, update, now, frame_size=frame_size)
             except Exception:  # noqa: BLE001 — la caída no debe tumbar la presencia
                 if camera.id not in _fall_failure_logged:
                     _fall_failure_logged.add(camera.id)
@@ -80,7 +82,7 @@ def process_frame(
                     )
         if update is not None and inactivity_engine is not None:
             try:
-                events = events + inactivity_engine.observe(camera, update, now)
+                events = events + inactivity_engine.observe(camera, update, now, frame_size=frame_size)
             except Exception:  # noqa: BLE001 — la inactividad no debe tumbar presencia ni caídas
                 if camera.id not in _inactivity_failure_logged:
                     _inactivity_failure_logged.add(camera.id)

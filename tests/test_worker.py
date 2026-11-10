@@ -105,7 +105,7 @@ def test_process_frame_emits_presence_and_fall_through_same_sink():
 
 def test_fall_engine_exception_does_not_break_presence(caplog, monkeypatch):
     class _Boom:
-        def observe(self, camera, update, now):
+        def observe(self, camera, update, now, frame_size=None):
             raise RuntimeError("boom")
 
     # El registro de "ya avisado" es global al módulo: se aísla para que el
@@ -203,9 +203,11 @@ class _SpyInactivity:
 
     def __init__(self):
         self.calls = 0
+        self.frame_sizes = []
 
-    def observe(self, camera, update, now):
+    def observe(self, camera, update, now, frame_size=None):
         self.calls += 1
+        self.frame_sizes.append(frame_size)
         return [Event("hub-1", camera.id, camera.name, "inactivity_started", "high", "t", {})]
 
 
@@ -226,7 +228,7 @@ def test_inactivity_runs_without_fall_engine():
 
 def test_inactivity_exception_does_not_break_presence_or_falls(caplog, monkeypatch):
     class _Boom:
-        def observe(self, camera, update, now):
+        def observe(self, camera, update, now, frame_size=None):
             raise RuntimeError("boom")
 
     monkeypatch.setattr(worker_module, "_inactivity_failure_logged", set())
@@ -251,7 +253,7 @@ def test_inactivity_exception_does_not_break_presence_or_falls(caplog, monkeypat
 
 def test_fall_exception_does_not_skip_inactivity(monkeypatch):
     class _Boom:
-        def observe(self, camera, update, now):
+        def observe(self, camera, update, now, frame_size=None):
             raise RuntimeError("boom")
 
     monkeypatch.setattr(worker_module, "_fall_failure_logged", set())
@@ -287,3 +289,31 @@ def test_tracker_exception_is_logged_once_and_presence_still_emits(caplog, monke
     assert sum("seguimiento" in r.message for r in caplog.records) == 1
     # el fallo del tracker no tapa un fallo posterior de la analítica de caídas
     assert worker_module._fall_failure_logged == set()
+
+
+class _SpyFall:
+    def __init__(self):
+        self.frame_sizes = []
+
+    def observe(self, camera, update, now, frame_size=None):
+        self.frame_sizes.append(frame_size)
+        return []
+
+
+class _FakeFrame:
+    def __init__(self, shape=None):
+        if shape is not None:
+            self.shape = shape
+
+
+def test_process_frame_passes_frame_size():
+    for frame, expected in ((_FakeFrame((360, 640, 3)), (640, 360)), (_FakeFrame(), None), (None, None)):
+        fall, inact = _SpyFall(), _SpyInactivity()
+        process_frame(
+            CAM, frame, StubDetector(person_count=1, bbox=LYING_BOX),
+            EventEngine(hub_id="hub-1", present_after_s=2.0, absent_after_s=5.0),
+            _RecordingSink(), now=0.0,
+            fall_engine=fall, tracker=Tracker(), inactivity_engine=inact,
+        )
+        assert fall.frame_sizes == [expected]
+        assert inact.frame_sizes == [expected]

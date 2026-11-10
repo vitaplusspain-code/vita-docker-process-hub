@@ -413,3 +413,54 @@ def test_sharp_drop_never_reaching_min_score_becomes_lying_after_wait():
     assert _types(events) == ["lying_detected"]
     # CONFIRM_FLOOR_S + FALL_SCORE_WAIT_S = 5 s en el suelo.
     assert events[0].payload["signals"]["floor_time_s"] == 5.0
+
+
+# --- cajas cortadas por el borde ---------------------------------------------
+
+FRAME = (640, 360)
+CUT_BOX = (200, 250, 600, 360)
+
+
+def _feed_fs(engine, tracker, clock, seq, frame_size, step=0.5):
+    events = []
+    now = 0.0
+    for dets in seq:
+        events += engine.observe(CAM, tracker.observe(CAM.id, dets, now), now, frame_size=frame_size)
+        now += step
+        clock.advance(step)
+    return events
+
+
+def _nose_only_cut():
+    kps = [(0.0, 0.0, 0.0)] * 17
+    kps[NOSE] = (250.0, 340.0, 0.9)
+    return Detection("person", 0.9, CUT_BOX, tuple(kps))
+
+
+def _standing_big():
+    return Detection("person", 0.9, (220, 110, 480, 355),
+                     _pose(nose=(350, 130), shoulders=(350, 160), hips=(350, 230)))
+
+
+def _cut_with_torso():
+    return Detection("person", 0.9, CUT_BOX,
+                     _pose(nose=(260, 335), shoulders=(300, 335), hips=(500, 335)))
+
+
+def test_cut_box_without_torso_never_falls_nor_lies():
+    eng, tracker, clock = _engine()
+    events = _feed_fs(eng, tracker, clock, [[_nose_only_cut()]] * 240, FRAME)
+    assert [e.type for e in events] == []
+
+
+def test_cut_box_with_torso_uses_angle():
+    eng, tracker, clock = _engine()
+    seq = [[_standing_big()]] * 2 + [[_cut_with_torso()]] * 8
+    events = _feed_fs(eng, tracker, clock, seq, FRAME)
+    assert "fall_detected" in [e.type for e in events]
+
+
+def test_frame_size_none_keeps_old_behaviour():
+    eng, tracker, clock = _engine()
+    events = _feed_fs(eng, tracker, clock, [[_nose_only_cut()]] * 20, None)
+    assert [e.type for e in events] == ["lying_detected"]

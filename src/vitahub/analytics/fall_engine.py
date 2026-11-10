@@ -34,6 +34,7 @@ from vitahub.analytics.fall_signals import (
     reference_y,
     score,
 )
+from vitahub.analytics.frame_edges import touches_edge
 from vitahub.analytics.tracker import Match, Track, TrackerUpdate, TrackIdentity
 from vitahub.models import Camera, Event
 
@@ -128,7 +129,13 @@ class FallEngine:
         self._clock = clock
         self._cameras: dict[str, _CameraState] = {}
 
-    def observe(self, camera: Camera, update: TrackerUpdate, now: float) -> list[Event]:
+    def observe(
+        self,
+        camera: Camera,
+        update: TrackerUpdate,
+        now: float,
+        frame_size: tuple[int, int] | None = None,
+    ) -> list[Event]:
         cam = self._cameras.setdefault(camera.id, _CameraState())
         events: list[Event] = []
 
@@ -142,7 +149,9 @@ class FallEngine:
 
         for match in update.matches:
             state = cam.states.setdefault(match.track.track_id, _EpisodeState())
-            events += self._update_state(camera, cam, state, match, now, len(update.matches))
+            events += self._update_state(
+                camera, cam, state, match, now, len(update.matches), frame_size
+            )
         return events
 
     # --- estado por pista -----------------------------------------------
@@ -155,6 +164,7 @@ class FallEngine:
         match: Match,
         now: float,
         person_count: int,
+        frame_size: tuple[int, int] | None = None,
     ) -> list[Event]:
         det = match.detection
         track = match.track
@@ -168,12 +178,15 @@ class FallEngine:
 
         # El frame de la transición arranca el contador en 0; a partir de ahí
         # cada muestra suma lo que se ha visto realmente.
-        horizontal = is_horizontal(signals)
+        # Caja cortada por el borde y sin torso fiable: las proporciones de la
+        # caja truncada no dicen nada de la postura, ni tumbada ni de pie.
+        cut_blind = signals.torso_angle is None and touches_edge(det.bbox, frame_size)
+        horizontal = not cut_blind and is_horizontal(signals)
         if horizontal:
             state.floor_time = state.floor_time + step if state.posture == "floor" else 0.0
             state.upright_time = 0.0
             state.posture = "floor"
-        elif is_upright(signals):
+        elif not cut_blind and is_upright(signals):
             state.upright_time = state.upright_time + step if state.posture == "upright" else 0.0
             state.floor_time = 0.0
             state.posture = "upright"
