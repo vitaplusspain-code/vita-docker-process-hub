@@ -218,6 +218,17 @@ después.
 Del §8 del spec (`docs/superpowers/specs/2026-08-22-deteccion-caidas-design.md`); ninguno bloquea la
 integración del slice.
 
+#### Añadidos en el slice de caída con bajada y tumbado (2026-11-10)
+
+- Calibrar `MIN_FALL_DROP` (0.2–0.4) y `EDGE_MARGIN_PX` con `scripts/replay_video.py` sobre
+  vídeos reales antes del piloto.
+- Clip para el aviso de tumbado, diferido por decisión del usuario.
+- Exclusión de zonas de sofá/cama: durante un tramo ciego (caja cortada por el borde sin torso
+  visible) no se emiten `fall_update` ni `lying_update`; > 10 min ciego activa el manejo de
+  huérfanos del rule engine.
+
+#### Originales del slice de 2026-08-22
+
 - Zonas de exclusión por cámara (sofá, cama) para bajar el score en ellas.
 - Tracker real si el IoU greedy confunde personas en hogares con más ocupación.
 - Clasificador temporal entrenado con los episodios recogidos (opción 3 del brainstorming).

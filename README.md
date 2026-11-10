@@ -117,11 +117,28 @@ Certificado comprometido o Jetson perdido: se revoca ese hogar y solo ese, con
 `aws iot update-certificate --profile <perfil> --region <región> --new-status REVOKED --certificate-id <id>`
 (los mismos `--profile`/`--region` que imprime `provision-hub.sh`; en una emergencia no hay tiempo de adivinarlos).
 
-## Caídas (opcional)
+## Caídas y tumbado (opcional)
 
-Pon `detector: person_pose` y `fall.enabled: true` (dentro de `inference:`) en `hub.yaml`. Salen
-eventos `fall_detected`/`fall_update`/`fall_resolved`, con `score` y `signals`, por stdout y por AWS
-(si el uplink está encendido). El hub no avisa a nadie: eso lo hará un sistema en AWS.
+Pon `detector: person_pose` y `fall.enabled: true` (dentro de `inference:`) en `hub.yaml`.
+
+**Caída:** `fall_detected` solo se emite si hay una bajada brusca (≥ `MIN_FALL_DROP` 0.3 box heights/s)
+seguida de postura horizontal y score ≥ mínimo. Si la bajada es clara pero el score está justo
+por debajo del mínimo, el hub espera hasta `FALL_SCORE_WAIT_S` (3 s) a que la permanencia en el
+suelo lo suba; si no llega al mínimo en ese plazo, se trata como tumbado. Eventos: `fall_detected`,
+`fall_update` (cada 60 s), `fall_resolved`.
+
+**Tumbado sin bajada:** si la persona lleva ≥ 2 s en postura horizontal sin haber tenido bajada
+brusca, el hub emite `lying_detected` (severity `high`, frente a `critical` de la caída). Mientras
+dura el episodio salen `lying_update` cada 60 s. Se cierra con `lying_resolved` cuando deja de estar
+tumbado (upright) o se pierde la pista (track_lost). El rule engine abre una alerta si el episodio
+dura ≥ 30 s dentro de la ventana de día. Sin clip por ahora.
+
+**Persona cortada por el borde:** una caja que toca el borde del fotograma sin visible torso no infiere
+postura y cuenta como `other` (ni tumbada ni de pie). Durante estos tramos no se emiten `fall_update` ni
+`lying_update`.
+
+Todos los eventos llevan `score`, `signals` y `episode_id`, por stdout y por AWS (si el uplink está
+encendido). El hub no avisa a nadie: eso lo hará un sistema en AWS.
 
 ## Inactividad de la persona objetivo (opcional)
 

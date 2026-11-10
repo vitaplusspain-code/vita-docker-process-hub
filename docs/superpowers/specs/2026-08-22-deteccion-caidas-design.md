@@ -5,6 +5,8 @@
 - Repo: `vita-docker-process-hub`
 - Slice anterior: `2026-08-21-uplink-eventos-aws-design.md`
 - Abre: el "subsistema C" (visión avanzada) que el spec del primer slice dejó fuera
+- **Actualización (2026-11-10):** ver `2026-11-10-caida-con-bajada-y-tumbado-design.md` para
+  cambios en la definición de caída, avisos de tumbado, y manejo de personas cortadas por el borde
 
 ## 0. El problema
 
