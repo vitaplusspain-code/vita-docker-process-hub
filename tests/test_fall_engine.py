@@ -80,19 +80,15 @@ def test_no_event_before_two_seconds_on_floor():
     assert _feed(eng, tracker, clock, seq) == []
 
 
-def test_slow_lie_down_scores_low_and_respects_min_score():
-    eng, tracker, clock = _engine(min_score=0.5)
-    # Sin transición brusca: aparece ya tumbada y no se mueve (drop_speed = 0),
-    # así que el score es 0.35 + 0.05·s de suelo. La permanencia sola acaba
-    # superando 0.5 a los 3 s (por diseño: seguir en el suelo es cada vez más
-    # sospechoso), así que esta rama se limita a 2.5 s de suelo (score 0.475).
-    seq_short = [[lying()]] * 6
-    assert _feed(eng, tracker, clock, seq_short) == []
-    seq = [[lying()]] * 8
+def test_score_below_min_score_becomes_lying():
+    # Con bajada brusca pero score por debajo de min_score no hay caída: el
+    # episodio sale como tumbado (lying_detected), nunca se descarta en silencio.
+    seq = [[standing()]] * 2 + [[lying()]] * 6
+    eng, tracker, clock = _engine(min_score=0.95)
+    events = _feed(eng, tracker, clock, seq)
+    assert [e.type for e in events] == ["lying_detected"]
     eng2, tracker2, clock2 = _engine(min_score=0.3)
-    events = _feed(eng2, tracker2, clock2, seq)
-    assert [e.type for e in events] == ["fall_detected"]
-    assert events[0].payload["score"] < 0.5
+    assert [e.type for e in _feed(eng2, tracker2, clock2, seq)] == ["fall_detected"]
 
 
 def test_crouch_and_stand_up_emits_nothing():
@@ -282,3 +278,111 @@ def test_anonymous_track_emits_person_null():
     events = _feed(eng, tracker, clock, [[standing()]] * 2 + [[lying()]] * 6 + [[]] * 7)
     assert [e.type for e in events] == ["fall_detected", "fall_resolved"]
     assert all(e.payload["person"] is None for e in events)
+
+
+# --- caída con bajada obligatoria y episodio de tumbado ----------------------
+
+
+def _types(events):
+    return [e.type for e in events]
+
+
+def _sitting(x=50):
+    # Torso a ~53° de la vertical: entre UPRIGHT_ANGLE (45) y HORIZONTAL_ANGLE (60).
+    return Detection("person", 0.9, (x - 40, 20, x + 40, 120),
+                     _pose(nose=(x - 20, 40), shoulders=(x, 50), hips=(x + 40, 80)))
+
+
+def _lying_episode(frames=6):
+    """Motor con un lying_detected ya emitido (tumbada desde el primer frame)."""
+    eng, tracker, clock = _engine()
+    events = _feed(eng, tracker, clock, [[lying()]] * frames)
+    assert _types(events) == ["lying_detected"]
+    return eng, tracker, clock, events[0], frames * 0.5
+
+
+def test_fall_requires_drop():
+    eng, tracker, clock = _engine()
+    events = _feed(eng, tracker, clock, [[lying()]] * 6)  # 3 s, sin bajada
+    assert _types(events) == ["lying_detected"]
+    ev = events[0]
+    assert ev.severity == "high"
+    assert set(ev.payload) == {"episode_id", "signals", "person_count", "person"}
+    assert ev.payload["episode_id"].startswith(CAM.id)
+
+
+def test_sharp_drop_still_reports_fall():
+    eng, tracker, clock = _engine()
+    events = _feed(eng, tracker, clock, [[standing()]] * 2 + [[lying()]] * 6)
+    assert _types(events) == ["fall_detected"]
+
+
+def test_slow_fall_becomes_lying():
+    eng, tracker, clock = _engine()
+    # Caderas de y=50 a y=115 en 4 s: ~0.14 alturas de caja/s, muy por debajo de 0.3.
+    ys = [50, 57, 64, 71, 78, 85, 92, 99, 106, 113]
+    seq = []
+    for i, y in enumerate(ys):
+        f = i / (len(ys) - 1)
+        x = 50
+        box = (int(x - 20 - 30 * f), int(0 + 50 * f), int(x + 20 + 30 * f), 120)
+        kp = _pose(nose=(x - 40 * f, 10 + 105 * f), shoulders=(x - 20 * f, 30 + 85 * f),
+                   hips=(x + 40 * f, y))
+        seq.append([Detection("person", 0.9, box, kp)])
+    seq += [[lying()]] * 8
+    events = _feed(eng, tracker, clock, seq, step=0.5)
+    types = _types(events)
+    assert "fall_detected" not in types
+    assert types.count("lying_detected") == 1
+
+
+def test_lying_updates_every_60s():
+    eng, tracker, clock = _engine()
+    events = _feed(eng, tracker, clock, [[lying()]] * 260)  # 130 s
+    types = _types(events)
+    assert types[0] == "lying_detected"
+    assert types.count("lying_update") == 2
+    assert "fall_update" not in types
+    for e in events[1:]:
+        assert set(e.payload) == {"episode_id", "person"}
+        assert e.severity == "info"
+
+
+def test_lying_resolves_when_upright():
+    eng, tracker, clock, detected, start = _lying_episode()
+    events = _feed(eng, tracker, clock, [[standing()]] * 5, start=start)  # 2.5 s
+    assert _types(events) == ["lying_resolved"]
+    res = events[0]
+    assert res.severity == "info"
+    assert res.payload["reason"] == "upright"
+    assert res.payload["duration_s"] > 0
+    assert res.payload["episode_id"] == detected.payload["episode_id"]
+    assert set(res.payload) == {"episode_id", "duration_s", "reason", "person"}
+
+
+def test_lying_resolves_when_sitting_up():
+    eng, tracker, clock, _detected, start = _lying_episode()
+    events = _feed(eng, tracker, clock, [[_sitting()]] * 6, start=start)
+    assert _types(events) == ["lying_resolved"]
+    assert events[0].payload["reason"] == "upright"
+
+
+def test_lying_resolves_on_track_lost():
+    eng, tracker, clock, detected, start = _lying_episode()
+    events = _feed(eng, tracker, clock, [[]] * 7, start=start)  # 3.5 s sin verla
+    assert _types(events) == ["lying_resolved"]
+    assert events[0].payload["reason"] == "track_lost"
+    assert events[0].payload["duration_s"] >= 0
+    assert events[0].payload["episode_id"] == detected.payload["episode_id"]
+
+
+def test_lying_never_escalates_to_fall():
+    eng, tracker, clock, _detected, start = _lying_episode()
+    # Un salto de caderas brusco mientras sigue en el suelo.
+    jump = Detection("person", 0.9, (0, 0, 100, 120),
+                     _pose(nose=(10, 100), shoulders=(30, 110), hips=(90, 118)))
+    low = Detection("person", 0.9, (0, 50, 100, 120),
+                    _pose(nose=(10, 60), shoulders=(30, 60), hips=(90, 60)))
+    events = _feed(eng, tracker, clock, [[low], [jump]] + [[lying()]] * 6, start=start)
+    assert "fall_detected" not in _types(events)
+    assert "fall_update" not in _types(events)

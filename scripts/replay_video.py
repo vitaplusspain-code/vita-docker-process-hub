@@ -31,7 +31,7 @@ from vitahub.worker import process_frame
 
 
 class _FilteredSink(EventSink):
-    """Deja pasar solo los eventos de caída e inactividad salvo que se pidan también los de presencia."""
+    """Deja pasar solo los eventos de caída, tumbado e inactividad salvo que se pidan también los de presencia."""
 
     def __init__(self, inner: EventSink, presence: bool) -> None:
         self._inner = inner
@@ -40,7 +40,7 @@ class _FilteredSink(EventSink):
 
     def emit(self, event: Event) -> None:
         self.events.append(event)
-        if self._presence or event.type.startswith(("fall_", "inactivity_")):
+        if self._presence or event.type.startswith(("fall_", "inactivity_", "lying_")):
             self._inner.emit(event)
 
     def close(self) -> None:

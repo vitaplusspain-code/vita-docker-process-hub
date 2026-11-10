@@ -1,8 +1,14 @@
 """Analítica de caídas: máquina de estados de episodio por pista.
 
-    upright ──tumbado──► candidate ──score ≥ min y ≥ 2 s en el suelo──► reported
-       ▲                    │                                             │
-       └──de pie 2 s────────┘         de pie 2 s, o pista perdida 3 s ────┘ → fall_resolved
+    upright ──tumbado──► candidate ──≥ 2 s en el suelo, con bajada brusca──► reported
+       ▲                    │  │          y score ≥ min                         │
+       │                    │  │                de pie 2 s, o pista perdida ────┘ → fall_resolved
+       │                    │  └──≥ 2 s en el suelo, sin bajada o score bajo──► lying
+       └──de pie 2 s────────┘                                                    │
+       ▲                                                                         │
+       └──fuera del suelo 2 s, o pista perdida ──────────────────────────────────┘ → lying_resolved
+
+Un episodio `lying` (tumbado sin caída) nunca escala a `reported`.
 
 El emparejamiento entre frames (qué pista es qué persona) lo hace el
 `Tracker` (ver vitahub.analytics.tracker); este motor solo consume sus
@@ -19,6 +25,7 @@ from datetime import UTC, datetime
 from typing import Literal
 
 from vitahub.analytics.fall_signals import (
+    MIN_FALL_DROP,
     Sample,
     Signals,
     compute_signals,
@@ -38,6 +45,8 @@ CONFIRM_FLOOR_S = 2.0
 CONFIRM_UPRIGHT_S = 2.0
 # Cadencia máxima de fall_update mientras sigue en el suelo.
 UPDATE_EVERY_S = 10.0
+# Cadencia de lying_update: un tumbado puede durar horas, no hace falta más.
+LYING_UPDATE_S = 60.0
 # Tiempo máximo que suma una sola muestra a los acumuladores: el doble del
 # periodo de muestreo a 2 fps. Un hueco mayor (frames perdidos, worker
 # atascado) no cuenta como tiempo "visto" en el suelo ni de pie.
@@ -46,6 +55,9 @@ MAX_STEP_S = 1.0
 # Por que se cierra un episodio: de pie CONFIRM_UPRIGHT_S ("upright") o pista
 # sin observacion TRACK_TTL_S ("track_lost"). Viaja en el payload de fall_resolved.
 ResolvedReason = Literal["upright", "track_lost"]
+# Igual para lying_resolved: "upright" = dejó de estar en el suelo (de pie o
+# sentada) CONFIRM_UPRIGHT_S; "track_lost" = pista sin observación.
+LyingReason = Literal["upright", "track_lost"]
 
 _SEV_HIGH = "high"
 _SEV_INFO = "info"
@@ -69,7 +81,7 @@ def _utcnow() -> datetime:
 @dataclass
 class _EpisodeState:
     history: list[Sample] = field(default_factory=list)
-    state: str = "upright"  # upright | candidate | reported
+    state: str = "upright"  # upright | candidate | reported | lying
     # Postura observada en el frame anterior: "" (pista nueva) | floor | upright | other.
     posture: str = ""
     # Tiempo *observado* en la postura actual: suma de pasos entre muestras
@@ -81,11 +93,14 @@ class _EpisodeState:
     # drop_speed (1.5 s) es más corta que la confirmación (2 s): sin
     # conservar el pico, la brusquedad de la caída nunca llegaría al score.
     peak_drop: float | None = None
-    # Solo con state == "reported":
+    # Con state == "lying": tiempo seguido fuera del suelo (de pie u otra
+    # postura, p. ej. sentada en la cama); cierra el episodio.
+    not_floor_time: float = 0.0
+    # Solo con state == "reported" o "lying":
     episode_id: str = ""
     episode_start: float = 0.0
     last_event_at: float = 0.0
-    max_score: float = 0.0
+    max_score: float = 0.0  # solo "reported"
 
 
 @dataclass
@@ -117,6 +132,8 @@ class FallEngine:
             state = cam.states.pop(track.track_id, None)
             if state is not None and state.state == "reported":
                 events.append(self._resolved(camera, state, track, now, "track_lost"))
+            elif state is not None and state.state == "lying":
+                events.append(self._lying_resolved(camera, state, track, now, "track_lost"))
 
         for match in update.matches:
             state = cam.states.setdefault(match.track.track_id, _EpisodeState())
@@ -185,19 +202,39 @@ class FallEngine:
                 state.peak_drop = None
                 return []
             current = score(signals)
-            confirmed = horizontal and floor_time >= CONFIRM_FLOOR_S
-            if confirmed and current >= self._min_score:
-                cam.episodes += 1
+            if not (horizontal and floor_time >= CONFIRM_FLOOR_S):
+                return []
+            cam.episodes += 1
+            state.episode_id = f"{camera.id}-{int(self._clock().timestamp())}-{cam.episodes}"
+            state.episode_start = now
+            state.last_event_at = now
+            if (
+                state.peak_drop is not None
+                and state.peak_drop >= MIN_FALL_DROP
+                and current >= self._min_score
+            ):
                 state.state = "reported"
-                state.episode_id = f"{camera.id}-{int(self._clock().timestamp())}-{cam.episodes}"
-                state.episode_start = now
-                state.last_event_at = now
                 state.max_score = current
                 return [
                     self._fall_event(
                         camera, state, track, "fall_detected", current, signals, person_count
                     )
                 ]
+            # En el suelo sin bajada brusca (o con score bajo): tumbado, no caída.
+            state.state = "lying"
+            state.not_floor_time = 0.0
+            return [self._lying_detected(camera, state, track, signals, person_count)]
+
+        if state.state == "lying":
+            state.not_floor_time = state.not_floor_time + step if state.posture != "floor" else 0.0
+            if state.not_floor_time >= CONFIRM_UPRIGHT_S:
+                ev = self._lying_resolved(camera, state, track, now, "upright")
+                state.state = "upright"
+                state.peak_drop = None
+                return [ev]
+            if now - state.last_event_at >= LYING_UPDATE_S:
+                state.last_event_at = now
+                return [self._lying_update(camera, state, track)]
             return []
 
         # reported: el score se recalcula cada frame (max_score es el pico real
@@ -262,6 +299,61 @@ class FallEngine:
                 "episode_id": state.episode_id,
                 "duration_s": round(now - state.episode_start, 3),
                 "max_score": round(state.max_score, 3),
+                "reason": reason,
+                "person": _person_payload(track.identity),
+            },
+        )
+
+    def _lying_detected(
+        self,
+        camera: Camera,
+        state: _EpisodeState,
+        track: Track,
+        signals: Signals,
+        person_count: int,
+    ) -> Event:
+        return Event(
+            hub_id=self._hub_id,
+            camera_id=camera.id,
+            camera_name=camera.name,
+            type="lying_detected",
+            severity=_SEV_HIGH,
+            timestamp=self._clock().isoformat(),
+            payload={
+                "episode_id": state.episode_id,
+                "signals": signals.to_payload(),
+                "person_count": person_count,
+                "person": _person_payload(track.identity),
+            },
+        )
+
+    def _lying_update(self, camera: Camera, state: _EpisodeState, track: Track) -> Event:
+        return Event(
+            hub_id=self._hub_id,
+            camera_id=camera.id,
+            camera_name=camera.name,
+            type="lying_update",
+            severity=_SEV_INFO,
+            timestamp=self._clock().isoformat(),
+            payload={
+                "episode_id": state.episode_id,
+                "person": _person_payload(track.identity),
+            },
+        )
+
+    def _lying_resolved(
+        self, camera: Camera, state: _EpisodeState, track: Track, now: float, reason: LyingReason
+    ) -> Event:
+        return Event(
+            hub_id=self._hub_id,
+            camera_id=camera.id,
+            camera_name=camera.name,
+            type="lying_resolved",
+            severity=_SEV_INFO,
+            timestamp=self._clock().isoformat(),
+            payload={
+                "episode_id": state.episode_id,
+                "duration_s": round(now - state.episode_start, 3),
                 "reason": reason,
                 "person": _person_payload(track.identity),
             },

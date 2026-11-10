@@ -55,6 +55,24 @@ def _pose(nose, shoulders, hips, conf=0.9):
 
 LYING_KPS = _pose(nose=(10, 110), shoulders=(30, 110), hips=(90, 110))
 LYING_BOX = (0, 90, 120, 120)
+STANDING_KPS = _pose(nose=(60, 10), shoulders=(60, 30), hips=(60, 50))
+STANDING_BOX = (40, 0, 80, 120)
+
+
+class _FallingDetector(StubDetector):
+    """De pie en el primer frame y tumbada después: la caída exige una bajada brusca."""
+
+    def __init__(self):
+        super().__init__(person_count=1, keypoints=LYING_KPS, bbox=LYING_BOX)
+        self._calls = 0
+
+    def detect(self, frame):
+        self._calls += 1
+        if self._calls == 1:
+            return StubDetector(
+                person_count=1, keypoints=STANDING_KPS, bbox=STANDING_BOX
+            ).detect(frame)
+        return super().detect(frame)
 
 
 def test_process_frame_without_fall_engine_is_unchanged():
@@ -71,7 +89,7 @@ def test_process_frame_emits_presence_and_fall_through_same_sink():
     fall = FallEngine(hub_id="hub-1", min_score=0.3)
     tracker = Tracker()
     sink = _RecordingSink()
-    detector = StubDetector(person_count=1, keypoints=LYING_KPS, bbox=LYING_BOX)
+    detector = _FallingDetector()
     all_events = []
     now = 0.0
     for _ in range(8):
@@ -116,7 +134,7 @@ def test_identifier_exception_does_not_break_falls(caplog, monkeypatch):
     fall = FallEngine(hub_id="hub-1", min_score=0.3)
     tracker = Tracker()  # uno solo: la pista debe persistir entre frames
     sink = _RecordingSink()
-    detector = StubDetector(person_count=1, keypoints=LYING_KPS, bbox=LYING_BOX)
+    detector = _FallingDetector()
     all_events = []
     now = 0.0
     for _ in range(8):
@@ -151,7 +169,7 @@ def test_identified_track_labels_fall_detected_person():
     fall = FallEngine(hub_id="hub-1", min_score=0.3)
     tracker = Tracker()  # uno solo: la identidad viaja colgada de la pista
     sink = _RecordingSink()
-    detector = StubDetector(person_count=1, keypoints=LYING_KPS, bbox=LYING_BOX)
+    detector = _FallingDetector()
     gallery = Gallery(people={"maria": MARIA})
     # identify() extrae como mucho 1 vez/s por cámara (ATTEMPT_EVERY_S): con
     # frames cada 0.5 s solo se consume en el 1º y el 3º (t=0.0 y t=1.0), que
@@ -216,7 +234,7 @@ def test_inactivity_exception_does_not_break_presence_or_falls(caplog, monkeypat
     fall = FallEngine(hub_id="hub-1", min_score=0.3)
     tracker = Tracker()
     sink = _RecordingSink()
-    detector = StubDetector(person_count=1, keypoints=LYING_KPS, bbox=LYING_BOX)
+    detector = _FallingDetector()
     all_events = []
     now = 0.0
     for _ in range(8):

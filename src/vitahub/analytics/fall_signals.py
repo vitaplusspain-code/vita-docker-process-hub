@@ -27,6 +27,10 @@ HORIZONTAL_ANGLE = 60.0
 UPRIGHT_ANGLE = 45.0
 # Sin keypoints: una caja más ancha que alta (×1.2) cuenta como tumbado.
 HORIZONTAL_RATIO = 1.2
+# Bajada mínima (alturas de caja por segundo) para que un episodio en el suelo
+# sea una caída (fall_*); sin ella es solo "tumbado" (lying_*). Coincide con el
+# punto en que el término de bajada del score empieza a puntuar (_DROP_0).
+MIN_FALL_DROP = 0.3
 # Ventana sobre la que se busca la bajada más rápida de las caderas.
 DROP_WINDOW_S = 1.5
 

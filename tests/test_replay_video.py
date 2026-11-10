@@ -54,3 +54,27 @@ def test_sink_filter_lets_inactivity_through():
     for t in ("person_detected", "fall_detected", "inactivity_started"):
         sink.emit(_ev(t))
     assert inner.got == ["fall_detected", "inactivity_started"]
+
+
+def test_summary_counts_lying_events():
+    events = [_ev("lying_detected"), _ev("lying_update"), _ev("lying_resolved")]
+    summary = replay_video.summarize(events, frames=10)
+    assert summary["events"] == {"lying_detected": 1, "lying_update": 1, "lying_resolved": 1}
+
+
+def test_sink_filter_lets_lying_through():
+    class _Inner:
+        def __init__(self):
+            self.got = []
+
+        def emit(self, event):
+            self.got.append(event.type)
+
+        def close(self):
+            pass
+
+    inner = _Inner()
+    sink = replay_video._FilteredSink(inner, presence=False)
+    for t in ("person_detected", "lying_detected", "lying_resolved"):
+        sink.emit(_ev(t))
+    assert inner.got == ["lying_detected", "lying_resolved"]
